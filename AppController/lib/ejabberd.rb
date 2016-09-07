@@ -34,8 +34,8 @@ module Ejabberd
     start_cmd = "bash #{START_EJABBERD_SCRIPT}"
     stop_cmd = "/etc/init.d/ejabberd stop"
     match_cmd = "sname ejabberd"
-    MonitInterface.start(:ejabberd, start_cmd, stop_cmd, ports=9999,
-      env_vars=nil, remote_ip=nil, remote_key=nil, match_cmd=match_cmd)
+    MonitInterface.start(:ejabberd, start_cmd, stop_cmd, [9999], nil,
+                         match_cmd, nil, nil)
   end
 
   def self.stop
@@ -48,7 +48,7 @@ module Ejabberd
 
   def self.does_app_need_receive?(app, runtime)
     if ["python27", "go", "php"].include?(runtime)
-      app_yaml_file = "/var/apps/#{app}/app/app.yaml"
+      app_yaml_file = "#{HelperFunctions::APPLICATIONS_DIR}/#{app}/app/app.yaml"
       app_yaml = YAML.load_file(app_yaml_file)["inbound_services"]
       if !app_yaml.nil? and app_yaml.include?("xmpp_message")
         return true
@@ -65,7 +65,7 @@ module Ejabberd
         else
           return false
         end
-      rescue Exception => exception
+      rescue => exception
         backtrace = exception.backtrace.join("\n")
         Djinn.log_warn("Exception while parsing xml contents: #{exception.message}. Backtrace: \n#{backtrace}")
         return false
@@ -82,7 +82,7 @@ module Ejabberd
 
     return if nodes.nil?
     nodes.each { |node|
-      next if node.is_login? # don't copy the file to itself
+      next if node.is_shadow? # don't copy the file to itself
       ip = node.private_ip
       ssh_key = node.ssh_key
       HelperFunctions.scp_file(ONLINE_USERS_FILE, ONLINE_USERS_FILE, ip, ssh_key)

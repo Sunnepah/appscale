@@ -102,7 +102,7 @@ class DjinnJobData
 
 
   # method_missing: will intercept calls to is_load_balancer?, is_appengine?
-  # and so on, without having all these methods to copy pasta
+  # and so on, without having all these methods to copy paste
   # as of writing this only the two named methods are in use
   # TODO: remove this and place dynamic method adds in initialize
   def method_missing(id, *args, &block)
@@ -116,5 +116,14 @@ class DjinnJobData
     super
   end
 
+  def eql?(other_node)
+    self.hash.eql?(other_node.hash)
+  end
+
+  def hash
+    # Consider two nodes to be the same if they have the same SSH key,
+    # private IP, and public IP.
+    [@ssh_key, @private_ip, @public_ip].join().hash()
+  end
 
 end

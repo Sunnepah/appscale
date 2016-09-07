@@ -1,9 +1,16 @@
+set -u
+set -e
+
 cd `dirname $0`/..
 if [ -z "$APPSCALE_HOME_RUNTIME" ]; then
     export APPSCALE_HOME_RUNTIME=`pwd`
 fi
 
-DESTDIR=$2
+if [ -z "${2-}" ]; then
+    DESTDIR=""
+else
+    DESTDIR=$2
+fi
 APPSCALE_HOME=${DESTDIR}${APPSCALE_HOME_RUNTIME}
 CURL_OPTS="-s"
 
@@ -35,11 +42,9 @@ case "$1" in
         installjavajdk
         installphp54
         installappserverjava
-        installthrift
         installtornado
         installpycrypto 
         installflexmock
-        postinstalltornado
         installzookeeper
         postinstallzookeeper
         installcassandra
@@ -55,6 +60,12 @@ case "$1" in
         increaseconnections
         installVersion
         installrequests
+        installpyopenssl
         postinstallrsyslog
+        installpsutil
+        installapiclient
+        buildgo
+        installtaskqueue
+        prepdashboard
         ;;
 esac

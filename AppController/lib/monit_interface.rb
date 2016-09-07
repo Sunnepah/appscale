@@ -1,15 +1,25 @@
 #!/usr/bin/ruby -w
 
 # Imports within Ruby's standard libraries.
+require 'monitor'
 require 'tmpdir'
 
 # Imports AppScale's libraries.
 require 'helperfunctions'
 
 
-# A constant that we use to indicate that we want the output produced
-# by remotely executed SSH commands.
-WANT_OUTPUT = true
+# Where we save the configuration file.
+MONIT_CONFIG = "/etc/monit/conf.d"
+
+
+# Monit is finicky when it comes to multiple commands at the same time.
+# Let's make sure we serialize access.
+MONIT_LOCK = Monitor.new()
+
+
+# Monit requires a bit of time after doing a reload to ensure no request
+# is lost.
+SMALL_WAIT = 2
 
 
 # AppScale uses monit to start processes, restart them if they die, or kill and
@@ -21,60 +31,78 @@ module MonitInterface
   # The location on the local filesystem of the monit executable.
   MONIT = "/usr/bin/monit"
 
-  def self.start_monit(remote_ip, remote_key)
-    self.execute_remote_command("service monit start", remote_ip, remote_key)
+  def self.start_monit()
+    self.run_cmd("service monit start")
   end
   
-  def self.start(watch, start_cmd, stop_cmd, ports, env_vars=nil,
-    remote_ip=nil, remote_key=nil, match_cmd=start_cmd, mem=nil)
+  def self.start(watch, start_cmd, stop_cmd, ports, env_vars, match_cmd, mem,
+    pidfile)
 
-    ports = [ports] unless ports.class == Array
     ports.each { |port|
       self.write_monit_config(watch, start_cmd, stop_cmd, port,
-        env_vars, remote_ip, remote_key, match_cmd, mem)
+        env_vars, match_cmd, mem, pidfile)
     }
 
-    self.execute_remote_command("#{MONIT} start -g #{watch}", remote_ip, remote_key)
+    self.run_cmd("#{MONIT} start -g #{watch}")
   end
 
-  def self.start_file(watch, path, action, hours=12, remote_ip=nil, remote_key=nil)
+  def self.start_file(watch, path, action, hours=12)
     contents = <<BOO
 check file #{watch} path "#{path}" every 2 cycles
   group #{watch}
   if timestamp > 12 hours then exec "#{action}"
 BOO
-    monit_file = "/etc/monit/conf.d/appscale-#{watch}.cfg"
-    if remote_ip
-      tempfile = "#{Dir.tmpdir}/monit-#{watch}-#{port}.cfg"
-      HelperFunctions.write_file(tempfile, contents)
-      begin
-        HelperFunctions.scp_file(tempfile, monit_file, remote_ip, remote_key)
-      rescue AppScaleSCPException
-        Djinn.log_error("Failed to write monit file at #{remote_ip}")
-        Djinn.log_run("rm -rf #{tempfile}")
-        raise AppScaleSCPException.new("Failed to write monit file at #{remote_ip}")
-      end
-      Djinn.log_run("rm -rf #{tempfile}")
-    else
-      HelperFunctions.write_file(monit_file, contents)
-    end
+    monit_file = "#{MONIT_CONFIG}/appscale-#{watch}.cfg"
+    HelperFunctions.write_file(monit_file, contents)
+    Djinn.log_run("service monit reload")
 
-    self.execute_remote_command("service monit reload", remote_ip, remote_key)
-
-    ip = remote_ip || HelperFunctions.local_ip
-    Djinn.log_info("Watching file #{path} for #{watch} on ip #{ip}" +
+    Djinn.log_info("Watching file #{path} for #{watch}" +
       " with exec action [#{action}]")
 
-
-    self.execute_remote_command("#{MONIT} start -g #{watch}", remote_ip, remote_key)
+    Djinn.log_run("#{MONIT} start -g #{watch}")
   end
 
-  def self.restart(watch, remote_ip=nil, remote_key=nil)
-    self.execute_remote_command("#{MONIT} restart -g #{watch}", remote_ip, remote_key)
+  def self.restart(watch)
+    self.run_cmd("#{MONIT} restart -g #{watch}")
   end
+
+  # This function unmonitors and optionally stops the service, and removes
+  # the monit configuration file.
+  def self.stop(watch, stop=true)
+    # To make sure the service is stopped, we query monit till the service
+    # is not any longer running.
+    running = true
+    while running
+      if stop
+        Djinn.log_info("stop_monitoring: stopping service #{watch}.")
+        self.run_cmd("#{MONIT} stop -g #{watch}")
+      else
+        Djinn.log_info("stop_monitoring: unmonitor service #{watch}.")
+        self.run_cmd("#{MONIT} unmonitor -g #{watch}")
+      end
+
+      10.downto(0) {
+        if not self.is_running?(watch)
+          running = false
+          break
+        end
+        Djinn.log_debug("Waiting for monit to stop #{watch}.")
+        Kernel.sleep(SMALL_WAIT)
+      }
+    end
+
+    # Now let's find the corresponding configuration file and remove it.
+    config = Dir::glob("#{MONIT_CONFIG}/appscale-#{watch}*")
+    if config.length > 1
+      Djinn.log_info("Found multiple monit config matches for #{watch}: #{config}.")
+    end
+    FileUtils.rm_rf(config)
+    self.run_cmd('service monit reload', true)
+  end
+
 
   def self.write_monit_config(watch, start_cmd, stop_cmd, port,
-    env_vars, remote_ip, remote_key, match_cmd, mem)
+    env_vars, match_cmd, mem, pidfile)
 
     # Monit doesn't support environment variables in its DSL, so if the caller
     # wants environment variables passed to the app, we have to collect them and
@@ -95,8 +123,10 @@ BOO
     full_start_command = "/bin/bash -c '#{env_vars_str} #{start_cmd} " +
       "1>>#{logfile} 2>>#{logfile}'"
 
+    match_str = %Q[MATCHING "#{match_cmd}"]
+    match_str = "PIDFILE #{pidfile}" unless pidfile.nil?
     contents = <<BOO
-check process #{watch}-#{port} matching "#{match_cmd}"
+CHECK PROCESS #{watch}-#{port} #{match_str}
   group #{watch}
   start program = "#{full_start_command}"
   stop program = "#{stop_cmd}"
@@ -110,59 +140,54 @@ BOO
       # It was not an integer, ignoring it.
     end
 
-    monit_file = "/etc/monit/conf.d/appscale-#{watch}-#{port}.cfg"
-    if remote_ip
-      tempfile = "#{Dir.tmpdir}/monit-#{watch}-#{port}.cfg"
-      HelperFunctions.write_file(tempfile, contents)
-      begin
-        HelperFunctions.scp_file(tempfile, monit_file, remote_ip, remote_key)
-      rescue AppScaleSCPException
-        Djinn.log_error("Failed to write monit file at #{remote_ip}")
-        Djinn.log_run("rm -rf #{tempfile}")
-        raise AppScaleSCPException.new("Failed to write monit file at #{remote_ip}")
-      end
-      Djinn.log_run("rm -rf #{tempfile}")
-    else
-      HelperFunctions.write_file(monit_file, contents)
+    monit_file = "#{MONIT_CONFIG}/appscale-#{watch}-#{port}.cfg"
+    changing_config = true
+    if File.file?(monit_file)
+      current_contents = File.open(monit_file).read()
+      changing_config = false if contents == current_contents
     end
 
-    self.execute_remote_command("service monit reload", remote_ip, remote_key)
+    if changing_config
+      HelperFunctions.write_file(monit_file, contents)
+      self.run_cmd('service monit reload', true)
+    end
 
-    ip = remote_ip || HelperFunctions.local_ip
-    Djinn.log_info("Starting #{watch} on ip #{ip}, port #{port}" +
+    Djinn.log_info("Starting #{watch} on port #{port}" +
       " with start command [#{start_cmd}] and stop command [#{stop_cmd}]")
   end
 
-  def self.stop(watch, remote_ip=nil, remote_key=nil)
-    self.execute_remote_command("#{MONIT} stop -g #{watch}", remote_ip, remote_key)
-  end
-
-  def self.remove(watch, remote_ip=nil, remote_key=nil)
-    self.execute_remote_command("#{MONIT} stop -g #{watch}", remote_ip, remote_key)
-    self.execute_remote_command("#{MONIT} unmonitor -g #{watch}", remote_ip, remote_key)
-  end
-
-  def self.shutdown(remote_ip=nil, remote_key=nil)
-    self.execute_remote_command("#{MONIT} quit", remote_ip, remote_key)
-  end
-
-  def self.is_running?(watch, remote_ip=nil, remote_key=nil)
-    output = self.execute_remote_command("#{MONIT} summary | grep #{watch} " +
-      "| grep Running", remote_ip, remote_key)
+  def self.is_running?(watch)
+    output = self.run_cmd("#{MONIT} summary | grep #{watch} | grep Running")
     return (not output == "")
   end
 
-  private
-  def self.execute_remote_command(cmd, ip, ssh_key)
-    local = ip.nil?
-    
-    if local
-      output = Djinn.log_run(cmd)
-    else
-      output = HelperFunctions.run_remote_command(ip, cmd, ssh_key, WANT_OUTPUT)
-      Djinn.log_debug("running command #{cmd} on ip #{ip} returned #{output}")
+  # This function returns a list of running applications: the
+  # dev_appservers needs to still be monitored by monit.
+  # Returns:
+  #   A list of application:port records.
+  def self.running_appengines()
+    appengines = []
+    output = self.run_cmd("#{MONIT} summary | grep -E 'app___.*Running'")
+    appengines_raw = output.gsub! /Process 'app___(.*)-([0-9]*).*/, '\1:\2'
+    if appengines_raw
+      appengines_raw.split("\n").each{ |appengine|
+        appengines << appengine if !appengine.split(":")[1].nil?
+      }
     end
 
+    Djinn.log_debug("Found these appservers processes running: #{appengines}.")
+    return appengines
+  end
+
+  private
+  def self.run_cmd(cmd, sleep=false)
+    output = ""
+    MONIT_LOCK.synchronize {
+      output = Djinn.log_run(cmd)
+      # Some command (ie reload) requires some extra time to ensure monit
+      # is ready for the subsequent command.
+      Kernel.sleep(SMALL_WAIT) if sleep
+    }
     return output
   end
 end

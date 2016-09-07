@@ -5,6 +5,7 @@ require 'openssl'
 require 'soap/rpc/driver'
 require 'timeout'
 
+require 'json'
 
 # Imports for the AppController
 $:.unshift File.join(File.dirname(__FILE__), "..")
@@ -61,6 +62,11 @@ class InfrastructureManagerClient
     @conn.add_method("terminate_instances", "parameters", "secret")
     @conn.add_method("attach_disk", "parameters", "disk_name", "instance_id",
       "secret")
+    @conn.add_method("get_cpu_usage", "secret")
+    @conn.add_method("get_disk_usage", "secret")
+    @conn.add_method("get_memory_usage", "secret")
+    @conn.add_method("get_service_summary", "secret")
+    @conn.add_method("get_swap_usage", "secret")
   end
   
 
@@ -72,7 +78,7 @@ class InfrastructureManagerClient
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
           OpenSSL::SSL::SSLError, NotImplementedError, Errno::EPIPE,
-          Errno::ECONNRESET, SOAP::EmptyResponseError, Exception => e
+          Errno::ECONNRESET, SOAP::EmptyResponseError, StandardError => e
           if retry_on_except
             Kernel.sleep(1)
             Djinn.log_debug("[#{callr}] exception in make_call to " +
@@ -111,14 +117,21 @@ class InfrastructureManagerClient
         'EC2_SECRET_KEY' => options['ec2_secret_key'],
         'EC2_URL' => options['ec2_url']
       },
-      'project' => options['project'],  # GCE-specific
+      "project" => options['project'],  # GCE-specific
       "group" => options['group'],
       "image_id" => options['machine'],
       "infrastructure" => options['infrastructure'],
       "instance_type" => options['instance_type'],
       "keyname" => options['keyname'],
       "use_spot_instances" => options['use_spot_instances'],
-      "max_spot_price" => options['max_spot_price']
+      "max_spot_price" => options['max_spot_price'],
+      "azure_subscription_id" => options['azure_subscription_id'],
+      "azure_app_id" => options['azure_app_id'],
+      "azure_app_secret_key" => options['azure_app_secret_key'],
+      "azure_tenant_id" => options['azure_tenant_id'],
+      "azure_resource_group" => options['azure_resource_group'],
+      "azure_group_tag" => options['azure_group_tag'],
+      "azure_storage_account" => options['azure_storage_account'],
     }
   end
 
@@ -240,6 +253,41 @@ class InfrastructureManagerClient
       Djinn.log_debug("Attach disk returned #{disk_info.inspect}")
       return disk_info['location']
     }
+  end
+
+
+
+  # Retrieves system monitoring statistics from the SystemManager.
+  # Returns:
+  #  A hash of the all the stats combined.
+  def get_system_stats()
+    Djinn.log_debug("Calling SystemManager")
+
+    cpu_usage = JSON.parse(@conn.get_cpu_usage(@secret))
+    Djinn.log_debug("CPU usage: #{cpu_usage}")
+
+    disk_usage = JSON.parse(@conn.get_disk_usage(@secret))
+    Djinn.log_debug("Disk usage: #{disk_usage}")
+
+    memory_usage = JSON.parse(@conn.get_memory_usage(@secret))
+    Djinn.log_debug("Memory usage: #{memory_usage}")
+
+    service_summary = JSON.parse(@conn.get_service_summary(@secret))
+    Djinn.log_debug("Service summary: #{service_summary}")
+
+    swap_usage = JSON.parse(@conn.get_swap_usage(@secret))
+    Djinn.log_debug("Swap usage: #{swap_usage}")
+
+    all_stats = cpu_usage
+    all_stats = all_stats.merge(disk_usage)
+    all_stats = all_stats.merge(memory_usage)
+    all_stats = all_stats.merge(swap_usage)
+
+    # Service summary is a flat dictionary, while the rest contain nested
+    # dictionaries.
+    all_stats["services"] = service_summary
+
+    return all_stats
   end
 
 

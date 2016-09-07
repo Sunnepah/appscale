@@ -24,7 +24,7 @@ require 'custom_exceptions'
 # BadConfigurationExceptions represent an exception that can be thrown by the
 # AppController or any other library it uses, if a method receives inputs
 # it isn't expecting.
-class BadConfigurationException < Exception
+class BadConfigurationException < StandardError
 end
 
 
@@ -83,11 +83,6 @@ module HelperFunctions
     "CLOUD_EC2_ACCESS_KEY", "CLOUD_EC2_SECRET_KEY"]
 
 
-  # The first port that should be used to host Google App Engine applications
-  # that users have uploaded.
-  APP_START_PORT = 20000
-
-
   # A constant that indicates that SSL should be used when checking if a given
   # port is open.
   USE_SSL = true
@@ -139,6 +134,14 @@ module HelperFunctions
   # The proc file to use to read memory installed.
   PROC_MEM_FILE = "/proc/meminfo"
 
+
+  # Where we store the applications code.
+  APPLICATIONS_DIR = "/var/apps"
+
+
+  # Metadata service for Google and AWS
+  GCE_METADATA = "http://169.254.169.254/computeMetadata/v1/instance/"
+  AWS_METADATA = "http://169.254.169.254/latest/meta-data/"
 
   def self.shell(cmd)
     return `#{cmd}`
@@ -237,7 +240,7 @@ module HelperFunctions
       total_time_slept += sleep_time
 
       if !timeout.nil? and total_time_slept > timeout
-        raise Exception.new("Waited too long for #{ip}:#{port} to open!")
+        raise "Waited too long for #{ip}:#{port} to open!"
       end
     }
   end
@@ -257,7 +260,7 @@ module HelperFunctions
       total_time_slept += sleep_time
 
       if !timeout.nil? and total_time_slept > timeout
-        raise Exception.new("Waited too long for #{ip}:#{port} to close!")
+        raise "Waited too long for #{ip}:#{port} to close!"
       end
     }
   end
@@ -291,7 +294,8 @@ module HelperFunctions
         Kernel.sleep(1)
         retry
       end
-    rescue
+    rescue => except
+      Djinn.log_warn("[is_port_open]: got #{except.message}.")
     end
   
     return false
@@ -444,7 +448,7 @@ module HelperFunctions
   end
 
   def self.setup_app(app_name, untar=true)
-    meta_dir = "/var/apps/#{app_name}"
+    meta_dir = get_app_path(app_name)
     tar_dir = "#{meta_dir}/app/"
     tar_path = "/opt/appscale/apps/#{app_name}.tar.gz"
 
@@ -509,14 +513,14 @@ module HelperFunctions
   # TODO: This doesn't solve the problem if the IP address isn't there
   # the first time around - should we sleep and retry in that case?
   def self.local_ip()
-    if !@@my_local_ip.nil?
+    unless @@my_local_ip.nil?
       Djinn.log_debug("Returning cached ip #{@@my_local_ip}")
       return @@my_local_ip
     end
 
     bound_addrs = self.get_all_local_ips()
     if bound_addrs.length.zero?
-      raise Exception.new("Couldn't get our local IP address")
+      raise "Couldn't get our local IP address"
     end
 
     addr = bound_addrs[0]
@@ -542,11 +546,11 @@ module HelperFunctions
   end
 
   def self.get_ips(ips)
-    self.log_and_crash("ips not even length array") if ips.length % 2 != 0
+    self.log_and_crash("ips not even length array") if ips.length.odd?
     reported_public = []
     reported_private = []
     ips.each_index { |index|
-      if index % 2 == 0
+      if index.even?
         reported_public << ips[index]
       else
         reported_private << ips[index]
@@ -575,7 +579,7 @@ module HelperFunctions
     actual_private.each_index { |index|
       begin
         actual_private[index] = HelperFunctions.convert_fqdn_to_ip(actual_private[index])
-      rescue Exception
+      rescue
         # this can happen if the private ip doesn't resolve
         # which can happen in hybrid environments: euca boxes wont be 
         # able to resolve ec2 private ips, and vice-versa in euca-managed-mode
@@ -587,34 +591,6 @@ module HelperFunctions
     return actual_public, actual_private
   end
 
-  def self.get_public_ips(ips)
-    self.log_and_crash("ips not even length array") if ips.length % 2 != 0
-    reported_public = []
-    reported_private = []
-    ips.each_index { |index|
-      if index % 2 == 0
-        reported_public << ips[index]
-      else
-        reported_private << ips[index]
-      end
-    }
-    
-    Djinn.log_debug("Reported Public IPs: [#{reported_public.join(', ')}]")
-    Djinn.log_debug("Reported Private IPs: [#{reported_private.join(', ')}]")
-    
-    public_ips = []
-    reported_public.each_index { |index|
-      if reported_public[index] != "0.0.0.0"
-        public_ips << reported_public[index]
-      elsif reported_private[index] != "0.0.0.0"
-        public_ips << reported_private[index]
-      end
-    }
-    
-    return public_ips.flatten
-  end
-
-  
   # Queries Amazon EC2's Spot Instance pricing history to see how much other
   # users have paid for the given instance type (assumed to be a Linux box),
   # so that we can place a bid that is similar to the average price. How
@@ -750,7 +726,7 @@ module HelperFunctions
     jobs = []
     if job.is_a?(String)
       # We only got one job, so just repeat it for each one of the nodes
-      public_ips.length.times { |i| jobs << job }
+      public_ips.length.times { jobs << job }
     else
       jobs = job
     end
@@ -822,14 +798,6 @@ module HelperFunctions
     self.shell("#{infrastructure}-terminate-instances #{instances.join(' ')}")
   end
 
-  def self.terminate_all_vms(infrastructure, keyname)
-    self.log_obscured_env
-    desc_instances = `#{infrastructure}-describe-instances`
-    instances = desc_instances.scan(/INSTANCE\s+(i-\w+)\s+[\w\-\s\.]+#{keyname}/).flatten
-    self.shell(`#{infrastructure}-terminate-instances #{instances.join(' ')}`)
-  end
-
-
   def self.get_usage
     top_results = `top -n1 -d0 -b`
     usage = {}
@@ -853,11 +821,6 @@ module HelperFunctions
     usage['free_mem'] = ((100 - Integer(Float(usage['mem']).truncate())) * self.get_total_mem()) / 100
 
     return usage
-  end
-
-  # Determine the port that the given app should use
-  def self.application_port(app_number, index, num_of_servers)
-    APP_START_PORT + (app_number * num_of_servers) + index
   end
 
   def self.generate_location_config handler
@@ -913,16 +876,24 @@ module HelperFunctions
     return result
   end
 
-  def self.get_app_path app_name
-    return "/var/apps/#{app_name}/"
+  def self.get_loaded_apps()
+    apps =[]
+    Dir["#{APPLICATIONS_DIR}/*"].each{ |app|
+      apps << File.basename(app)
+    }
+    return apps
   end
 
-  def self.get_cache_path app_name
+  def self.get_app_path(app_name)
+    return "#{APPLICATIONS_DIR}/#{app_name}"
+  end
+
+  def self.get_cache_path(app_name)
     return File.join(get_app_path(app_name),"cache")
   end
 
   # The directory where the applications tarball will be extracted to
-  def self.get_untar_dir app_name
+  def self.get_untar_dir(app_name)
     return File.join(get_app_path(app_name),"app")
   end
 
@@ -958,7 +929,7 @@ module HelperFunctions
   # Returns:
   #  The absolute path of the appengine-web.xml configuration file.
   def self.get_appengine_web_xml(app)
-    return File.join(self.get_web_inf_dir("/var/apps/#{app}/app"), "/appengine-web.xml")
+    return File.join(self.get_web_inf_dir("#{get_app_path(app)}/app"), "/appengine-web.xml")
   end
 
   # We have the files full path (e.g. ./data/myappname/static/file.txt) but we want is
@@ -973,7 +944,7 @@ module HelperFunctions
 
     begin
       tree = YAML.load_file(File.join(untar_dir,"app.yaml"))
-    rescue Errno::ENOENT => e
+    rescue Errno::ENOENT
       return self.parse_java_static_data(app_name)
     end
 
@@ -1041,13 +1012,13 @@ module HelperFunctions
           relative_filename = get_relative_filename(filename,app_name)
 
           # Only include files that match the provided upload regular expression
-          next if !relative_filename.match(upload_regex)
+          next unless relative_filename.match(upload_regex)
 
           # Skip all files which match the skip file regex so they do not get copied
           next if relative_filename.match(skip_files_regex)
 
           file_cache_path = File.join(cache_path, File.dirname(relative_filename))
-          FileUtils.mkdir_p file_cache_path if !File.exists?(file_cache_path)
+          FileUtils.mkdir_p file_cache_path unless File.exists?(file_cache_path)
           
           FileUtils.cp_r filename, File.join(file_cache_path,File.basename(filename))
         end
@@ -1080,7 +1051,7 @@ module HelperFunctions
   def self.parse_java_static_data(app_name)
     # Verify that app_name is a Java app.
     tar_gz_location = "/opt/appscale/apps/#{app_name}.tar.gz"
-    if !self.app_has_config_file?(tar_gz_location)
+    unless self.app_has_config_file?(tar_gz_location)
       Djinn.log_warn("#{app_name} does not appear to be a Java app")
       return []
     end
@@ -1146,7 +1117,7 @@ module HelperFunctions
     end
 
     handlers.map! do |handler|
-      next if !handler.key?("secure")
+      next unless handler.key?("secure")
 
       if handler["secure"] == "always"
         secure_handlers[:always] << handler
@@ -1229,11 +1200,13 @@ module HelperFunctions
       end
       retries_left -= 1
       if retries_left > 0
-        raise Exception
+        raise "Received non-zero exit code while checking for #{location}."
       else
         return false
       end
-    rescue Exception
+    rescue => error
+      Djinn.log_debug("Saw #{error.inspect}. " +
+        "Retrying in #{SLEEP_TIME} seconds.")
       Kernel.sleep(SLEEP_TIME)
       retry
     end
@@ -1307,47 +1280,6 @@ module HelperFunctions
   end
 
 
-  # Takes the given array and eliminates all but the last n items in it.
-  # If the array has less than n items in it, we add on the given item
-  # to pad it back to n items.
-  #
-  # Args:
-  #   n: An Integer that indicates how many items should be in the returned
-  #     Array.
-  #   array: An Array of objects that we want to shorten to n items.
-  #   padding: The object that multiple copies of will be added to array if
-  #     array is less than n items long.
-  #
-  # Returns:
-  #   An Array containing the last n items of array.
-  def self.shorten_to_n_items(n, array, padding)
-    len = array.length
-    if len < n
-      array + [padding] * (n - len)
-    else
-      array[len-n..len-1]
-    end
-  end
-
-  def self.find_majority_item(array)
-    count = {}
-    array.each { |item|
-      count[item] = 0 if count[item].nil?
-      count[item] += 1
-    }
-
-    max_k = nil
-    max_v = 0
-    count.each { |k, v|
-      if v > max_v
-        max_k = k
-        max_v = v
-      end
-    }
-
-    return max_k
-  end
-
   # Finds the configuration file for the given Google App Engine application to
   # see if any environment variables should be set for it.
   #
@@ -1361,7 +1293,7 @@ module HelperFunctions
   #   AppScaleException: If the given application doesn't have a configuration
   #   file.
   def self.get_app_env_vars(app)
-    app_yaml_file = "/var/apps/#{app}/app/app.yaml"
+    app_yaml_file = "#{get_app_path(app)}/app/app.yaml"
     appengine_web_xml_file = self.get_appengine_web_xml(app)
     if File.exists?(app_yaml_file)
       tree = YAML.load_file(app_yaml_file)
@@ -1392,11 +1324,11 @@ module HelperFunctions
   # Returns:
   #   Boolean true if the app is thread safe. Boolean false if it is not.
   def self.get_app_thread_safe(app)
-    if app != "appscaledashboard" and app.start_with?(GAE_PREFIX) == false
+    if app != AppDashboard::APP_NAME and app.start_with?(GAE_PREFIX) == false
       return false
     end
     app = app.sub(GAE_PREFIX, '')    
-    app_yaml_file = "/var/apps/#{app}/app/app.yaml"
+    app_yaml_file = "#{get_app_path(app)}/app/app.yaml"
     appengine_web_xml_file = self.get_appengine_web_xml(app)
     if File.exists?(app_yaml_file)
       tree = YAML.load_file(app_yaml_file)
@@ -1437,9 +1369,7 @@ module HelperFunctions
 
     # If asked for, wait for a while before crashing. This will help the
     # tools to collect the status report or crashlog.
-    if !sleep.nil?
-      Kernel.sleep(sleep)
-    end
+    Kernel.sleep(sleep) unless sleep.nil?
     abort(message)
   end
 
@@ -1454,7 +1384,7 @@ module HelperFunctions
     contents = self.read_file(RESOLV_CONF, chomp=false)
     new_contents = ""
     contents.split("\n").each { |line|
-      new_contents << line if !contents.include?("nameserver")
+      new_contents << line unless contents.include?("nameserver")
     }
     self.write_file(RESOLV_CONF, new_contents)
   end
@@ -1466,49 +1396,27 @@ module HelperFunctions
   end
 
 
-  def self.write_local_appcontroller_state(state)
-    self.write_json_file(APPCONTROLLER_STATE_LOCATION, state)
-  end
-
-
-  # Gets the local state from a state file.
-  # 
+  # Contacts the Metadata Service running in Amazon Web Services, or
+  # Google Compute Engine or any other supported public cloud,  to
+  # determine the public FQDN associated with this virtual machine.
+  #
+  # This method should only be called when running in a cloud that
+  # provides an AWS-compatible Metadata Service (e.g., EC2 or Eucalyptus).
+  #
   # Returns:
-  # Json file if it exists, nil otherwise.
-  def self.get_local_appcontroller_state()
-    if File.exists?(APPCONTROLLER_STATE_LOCATION)
-      return self.read_json_file(APPCONTROLLER_STATE_LOCATION)
-    else
-      return nil
+  #   A String containing the public IP that traffic can be sent to that
+  #   reaches this machine.
+  def self.get_public_ip_from_metadata_service()
+    aws_ip = `curl -L -s #{AWS_METADATA}/public-ipv4`
+    unless aws_ip.empty?
+      Djinn.log_debug("Detected AWS public ip: #{aws_ip}.")
+      return aws_ip
+    end
+    gce_ip = `curl -L -s #{GCE_METADATA}/network-interfaces/0/access-configs/0/external-ip`
+    unless gce_ip.empty?
+      Djinn.log_debug("Detected GCE public ip: #{gce_ip}.")
+      return gce_ip
     end
   end
-
-
-  # Contacts the Metadata Service running in Amazon Web Services to determine
-  # the public FQDN associated with this virtual machine.
-  #
-  # This method should only be called when running in a cloud that provides an
-  # AWS-compatible Metadata Service (e.g., EC2 or Eucalyptus).
-  #
-  # Returns:
-  #   A String containing the public FQDN that traffic can be sent to that
-  #   reaches this machine.
-  def self.get_public_ip_from_aws_metadata_service()
-    return `curl http://169.254.169.254/latest/meta-data/public-hostname`
-  end
-
-
-  # Contacts the Metadata Service running in Google Compute Engine to determine
-  # the public FQDN associated with this virtual machine.
-  #
-  # This method should only be called when running in Google Compute Engine.
-  #
-  # Returns:
-  #   A String containing the public FQDN that traffic can be sent to that
-  #   reaches this machine.
-  def self.get_public_ip_from_gce_metadata_service()
-    return `curl -L http://metadata/computeMetadata/v1beta1/instance/network-interfaces/0/access-configs/0/external-ip`
-  end
-
 
 end

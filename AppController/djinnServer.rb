@@ -50,7 +50,7 @@ class DjinnServer < SOAP::RPC::HTTPServer
   def job
     @djinn.job
   end
-  
+
   def djinn_locations
     @djinn.djinn_locations
   end
@@ -65,10 +65,9 @@ class DjinnServer < SOAP::RPC::HTTPServer
     add_method(@djinn, "get_app_info_map", "secret")
     add_method(@djinn, "relocate_app", "appid", "http_port", "https_port",
       "secret")
-    add_method(@djinn, "kill", "secret")    
+    add_method(@djinn, "kill", "stop_deployment", "secret")
     add_method(@djinn, "set_parameters", "djinn_locations",
       "database_credentials", "app_names", "secret")
-    add_method(@djinn, "set_apps", "app_names", "secret")
     add_method(@djinn, "status", "secret")
     add_method(@djinn, "get_stats", "secret")
     add_method(@djinn, "get_stats_json", "secret")
@@ -91,10 +90,9 @@ class DjinnServer < SOAP::RPC::HTTPServer
     add_method(@djinn, "gather_logs", "secret")
     add_method(@djinn, "add_routing_for_appserver", "app_id", "ip", "port",
       "secret")
+    add_method(@djinn, "add_routing_for_blob_server", "secret")
     add_method(@djinn, "remove_appserver_from_haproxy", "app_id", "ip", "port",
       "secret")
-    add_method(@djinn, "add_appserver_process", "app_id", "secret")
-    add_method(@djinn, "remove_appserver_process", "app_id", "port", "secret")
     add_method(@djinn, "run_groomer", "secret")
     add_method(@djinn, "get_property", "property_regex", "secret")
     add_method(@djinn, "set_property", "property_name", "property_value",
@@ -102,6 +100,26 @@ class DjinnServer < SOAP::RPC::HTTPServer
     add_method(@djinn, "deployment_id_exists", "secret")
     add_method(@djinn, "get_deployment_id", "secret")
     add_method(@djinn, "set_deployment_id", "secret")
+    add_method(@djinn, "set_node_read_only", "read_only", "secret")
+    add_method(@djinn, "set_read_only", "read_only", "secret")
+    add_method(@djinn, "get_all_stats", "secret")
+    add_method(@djinn, "does_app_exist", "appname", "secret")
+    add_method(@djinn, "reset_password", "username", "password", "secret")
+    add_method(@djinn, "does_user_exist", "username", "secret")
+    add_method(@djinn, "create_user", "username", "password", "account_type" ,"secret")
+    add_method(@djinn, "set_admin_role", "username", "is_cloud_admin", "capabilities" ,"secret")
+    add_method(@djinn, "get_app_data", "app_id", "secret")
+    add_method(@djinn, "reserve_app_id", "username", "app_id", "app_language" ,"secret")
+    add_method(@djinn, "primary_db_is_up", "secret")
+  end
+end
+
+def run_server(server)
+  begin
+    server.start
+  rescue => server_error
+    Djinn.log_error(server_error.message)
+    run_server(server)
   end
 end
 
@@ -145,13 +163,13 @@ server = DjinnServer.new(
   :SSLCertName => nil
 )
 
-trap('INT') {
-  Djinn.log_debug("Received INT signal, shutting down server")
+trap('TERM') {
+  Djinn.log_debug("Received TERM signal: stopping node services.")
   server.djinn.kill_sig_received = true
-  server.shutdown 
-  server.djinn.kill(secret)
+  server.shutdown
+  server.djinn.kill(false, secret)
 }
 
-new_thread = Thread.new { server.start }
+new_thread = Thread.new { run_server(server) }
 server.djinn.job_start(secret)
 new_thread.join()

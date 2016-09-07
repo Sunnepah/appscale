@@ -23,7 +23,7 @@ class AppManagerClient
   attr_reader :conn, :ip
 
   # The port that the AppManager binds to, by default.
-  SERVER_PORT = 49934
+  SERVER_PORT = 17445
 
   # Initialization function for AppManagerClient
   def initialize(ip)
@@ -47,7 +47,7 @@ class AppManagerClient
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
           OpenSSL::SSL::SSLError, NotImplementedError, Errno::EPIPE,
-          Errno::ECONNRESET, SOAP::EmptyResponseError, Exception => e
+          Errno::ECONNRESET, SOAP::EmptyResponseError, StandardError => e
           if retry_on_except
             Kernel.sleep(1)
             Djinn.log_debug("[#{callr}] exception in make_call to " +
@@ -107,11 +107,11 @@ class AppManagerClient
               'max_memory' => max_memory,
               'syslog_server' => syslog_server}
     json_config = JSON.dump(config)
-    result = ""
+    result = -1
     make_call(MAX_TIME_OUT, false, "start_app") {
       result = @conn.start_app(json_config)
     }
-    return result
+    return Integer(result)
   end
 
   # Wrapper for SOAP call to the AppManager to stop an application

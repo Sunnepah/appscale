@@ -1,5 +1,17 @@
 """ Constants that are used for Hermes functionality (backup/restore/etc.). """
 
+# The user account type for deploying the appscalesensor app.
+ACCOUNT_TYPE = "user"
+
+# The AppController port.
+APPCONTROLLER_PORT = "17443"
+
+# Location where deployed app source code resides in an AppScale deployment.
+APP_DIR_LOCATION = "/opt/appscale/apps"
+
+# The app id for the appscalesensor application.
+APPSCALE_SENSOR = 'appscalesensor'
+
 # The port br_service listens to.
 BR_SERVICE_PORT = "8423"
 
@@ -16,9 +28,8 @@ DEBUG = False
 # The slave ID is populated at runtime.
 DB_SLAVE_OBJECT_NAME = '/cassandra/db_slave_{0}.tar.gz'
 
-# The suffix for backup files from a ZK node.
-# The zk ID is populated at runtime.
-ZK_OBJECT_NAME = '/zookeeper/zk_node_{0}.tar.gz'
+# The file suffix to match for the tarred file to be deployed.
+FILE_SUFFIX = "tar.gz"
 
 # The port Hermes listens to.
 HERMES_PORT = "4378"
@@ -38,6 +49,9 @@ PORTAL_URL = "https://portal.appscale.com"
 # The AppScale Portal path for getting new tasks.
 PORTAL_POLL_PATH = "/get_appscale_task"
 
+# The AppScale Portal path for sending all stats.
+PORTAL_STATS_PATH = "/deployments/{}/all_stats"
+
 # The AppScale Portal path for reporting task status.
 PORTAL_STATUS_PATH = "/report_appscale_task"
 
@@ -49,6 +63,22 @@ REQUEST_TIMEOUT = 12*60*60
 
 # The list of supported tasks.
 SUPPORTED_TASKS = ['backup', 'restore']
+
+# The interval for sending deployment stats.
+STATS_INTERVAL = 60*1000    # 60 seconds.
+
+# The interval for checking for registered deployments.
+UPLOAD_SENSOR_INTERVAL = 60*1000    # 60 seconds.
+
+# The port that the SOAP server listens to.
+UA_SERVER_PORT = 4343
+
+# The username for deploying the appscalesensor app.
+USER_EMAIL = "appscale_user@appscale.local"
+
+# The suffix for backup files from a ZK node.
+# The zk ID is populated at runtime.
+ZK_OBJECT_NAME = '/zookeeper/zk_node_{0}.tar.gz'
 
 class HTTP_Codes(object):
   """ A class with HTTP status codes. """

@@ -16,7 +16,7 @@ require 'zookeeper'
 # A class of exceptions that we throw whenever we perform a ZooKeeper
 # operation that does not return successfully (but does not normally
 # throw an exception).
-class FailedZooKeeperOperationException < Exception
+class FailedZooKeeperOperationException < StandardError
 end
 
 
@@ -114,21 +114,26 @@ class ZKInterface
     end
 
     @@lock.synchronize {
-      @@zk = Zookeeper.new("#{ip}:#{SERVER_PORT}", timeout=TIMEOUT)
+      if defined?(@@zk)
+        Djinn.log_debug("Closing old connection to zookeeper.")
+        @@zk.close!
+      end
+      Djinn.log_debug("Opening connection to zookeeper at #{ip}.")
+      @@zk = Zookeeper.new("#{ip}:#{SERVER_PORT}", TIMEOUT)
     }
   end
 
-
-  # Initializes a new ZooKeeper connection to the "closest" node in the
-  # system. "Closeness" is defined as either "this node" (if it runs
-  # ZooKeeper), or an arbitrary node that runs ZooKeeper. Callers should use
-  # this method when they don't want to determine on their own which
-  # ZooKeeper box to connect to.
-  def self.init(my_node, all_nodes)
-    self.init_to_ip(my_node.private_ip, self.get_zk_location(my_node,
-      all_nodes))
+  # This method check if we are already connected to a zookeeper server.
+  #
+  # Returns:
+  #   A boolean to indicate if we are already connected to a zookeeper
+  #   server.
+  def self.is_connected?()
+    ret = false
+    ret = @@zk.connected?  if defined?(@@zk)
+    Djinn.log_debug("Connection status with zookeeper server: #{ret}.")
+    return ret
   end
-
 
   # Creates a new connection to use with ZooKeeper. Useful for scenarios
   # where the ZooKeeper library has terminated our connection but we still
@@ -177,9 +182,7 @@ class ZKInterface
   #   appname: A String corresponding to the appid of the app whose hosting
   #     data we want to erase.
   def self.clear_app_hosters(appname)
-    if !defined?(@@zk)
-      return
-    end
+    return unless defined?(@@zk)
 
     appname_path = ROOT_APP_PATH + "/#{appname}"
     app_hosters = self.get_children(appname_path)
@@ -295,20 +298,19 @@ class ZKInterface
         if @@client_ip == owner
           got_lock = false
         else 
-          Djinn.log_warn("Tried to get the lock, but it's currently owned " +
-            "by #{owner}. Will try again later.")
-          raise Exception
+          raise "Tried to get the lock, but it's currently owned by #{owner}."
         end
       end
-    rescue Exception => e
-      Djinn.log_warn("Saw an exception of class #{e.class}")
-      Kernel.sleep(5)
+    rescue => e
+      sleep_time = 5
+      Djinn.log_warn("Saw #{e.inspect}. Retrying in #{sleep_time} seconds.")
+      Kernel.sleep(sleep_time)
       retry
     end
 
     begin
       yield  # invoke the user's block, and catch any uncaught exceptions
-    rescue Exception => except
+    rescue => except
       Djinn.log_error("Ran caller's block but saw an Exception of class " +
         "#{except.class}")
       raise except
@@ -503,38 +505,6 @@ class ZKInterface
   end
 
 
-  # Returns an Array of Hashes that correspond to the App Engine applications
-  # hosted on the given ip address. Each hash contains the application's name,
-  # the IP address (which should be the same as the given IP), and the nginx
-  # port that the app is hosted on.
-  def self.get_app_instances_for_ip(ip)
-    app_instance_file = "#{APPCONTROLLER_NODE_PATH}/#{ip}/#{APP_INSTANCE}"
-    if !self.exists?(app_instance_file)
-      return []
-    end
-
-    json_instances = self.get(app_instance_file)
-    return JSON.load(json_instances)
-  end
-
-
-  # Adds an entry to ZooKeeper for the given IP, storing information about the
-  # Google App engine application it is hosting that can be used to update the
-  # AppDashboard should that node fail.
-  def self.add_app_instance(app_name, ip, port)
-    app_instance_file = "#{APPCONTROLLER_NODE_PATH}/#{ip}/#{APP_INSTANCE}"
-    if self.exists?(app_instance_file)
-      json_instances = self.get(app_instance_file)
-      instances = JSON.load(json_instances)
-    else
-      instances = []
-    end
-
-    instances << {'app_name' => app_name, 'ip' => ip, 'port' => port}
-    self.set(app_instance_file, JSON.dump(instances), NOT_EPHEMERAL)
-  end
-
-
   def self.get_job_data_for_ip(ip)
     return JSON.load(self.get("#{APPCONTROLLER_NODE_PATH}/#{ip}/job_data"))
   end
@@ -676,7 +646,7 @@ class ZKInterface
       self.reinitialize()
       Kernel.sleep(1)
       retry
-    rescue Exception => e
+    rescue => e
       backtrace = e.backtrace.join("\n")
       Djinn.log_warn("Saw a transient ZooKeeper error: #{e}\n#{backtrace}")
       Kernel.sleep(1)
@@ -686,6 +656,11 @@ class ZKInterface
 
 
   def self.exists?(key)
+    unless defined?(@@zk)
+      raise FailedZooKeeperOperationException.new("ZKinterface has not " +
+        "been initialized yet.")
+    end
+
     return self.run_zookeeper_operation {
       @@zk.get(:path => key)[:stat].exists
     }
@@ -693,6 +668,11 @@ class ZKInterface
 
 
   def self.get(key)
+    unless defined?(@@zk)
+      raise FailedZooKeeperOperationException.new("ZKinterface has not " +
+        "been initialized yet.")
+    end
+
     info = self.run_zookeeper_operation {
       @@zk.get(:path => key)
     }
@@ -706,6 +686,11 @@ class ZKInterface
 
 
   def self.get_children(key)
+    unless defined?(@@zk)
+      raise FailedZooKeeperOperationException.new("ZKinterface has not " +
+        "been initialized yet.")
+    end
+
     children = self.run_zookeeper_operation {
       @@zk.get_children(:path => key)[:children]
     }
@@ -719,6 +704,11 @@ class ZKInterface
 
 
   def self.set(key, val, ephemeral)
+    unless defined?(@@zk)
+      raise FailedZooKeeperOperationException.new("ZKinterface has not " +
+        "been initialized yet.")
+    end
+
     retries_left = 5
     begin
       info = {}
@@ -773,6 +763,11 @@ class ZKInterface
 
 
   def self.delete(key)
+    unless defined?(@@zk)
+      raise FailedZooKeeperOperationException.new("ZKinterface has not " +
+        "been initialized yet.")
+    end
+
     info = self.run_zookeeper_operation {
       @@zk.delete(:path => key)
     }
@@ -782,28 +777,5 @@ class ZKInterface
         " path #{key}, saw info #{info.inspect}")
     end
   end
-
-
-  def self.get_zk_location(my_node, all_nodes)
-    if my_node.is_zookeeper?
-      return my_node.private_ip
-    end
-
-    zk_node = nil
-    all_nodes.each { |node|
-      if node.is_zookeeper?
-        zk_node = node
-        break
-      end
-    }
-
-    if zk_node.nil?
-      HelperFunctions.log_and_crash("No ZooKeeper nodes were found. All " +
-        "nodes are #{nodes}, while my node is #{my_node}.")
-    end
-
-    return zk_node.private_ip
-  end
-
 
 end

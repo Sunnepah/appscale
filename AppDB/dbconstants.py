@@ -33,6 +33,9 @@ APP_ID_TABLE = "APP_IDS__"
 APP_ENTITY_TABLE = "ENTITIES__"
 APP_KIND_TABLE = "KINDS__"
 METADATA_TABLE = "METADATA__"
+DATASTORE_METADATA_TABLE = "DATASTORE_METADATA__"
+TRANSACTIONS_TABLE = 'TRANSACTIONS__'
+SCHEMA_TABLE = '__key__'
 
 INITIAL_TABLES = [ASC_PROPERTY_TABLE,
                   DSC_PROPERTY_TABLE,
@@ -40,8 +43,12 @@ INITIAL_TABLES = [ASC_PROPERTY_TABLE,
                   APP_ENTITY_TABLE,
                   APP_KIND_TABLE,
                   COMPOSITE_TABLE,
-                  JOURNAL_TABLE,
-                  METADATA_TABLE]
+                  METADATA_TABLE,
+                  USERS_TABLE,
+                  APPS_TABLE,
+                  SCHEMA_TABLE,
+                  DATASTORE_METADATA_TABLE,
+                  TRANSACTIONS_TABLE]
 
 ###########################################
 # DB schemas for version 1 of the datastore
@@ -108,8 +115,26 @@ APPS_SCHEMA = [
   "num_entries",
   "tar_ball",
   "enabled",
-  "classes",
   "indexes" ]
+
+DATASTORE_METADATA_SCHEMA = [
+  "version"]
+
+TRANSACTIONS_SCHEMA = [
+  'operation',
+  'operand',
+  'exclude_indices'
+]
+
+# All schema information for the keyspace is stored in the schema table.
+SCHEMA_TABLE_SCHEMA = ['schema']
+
+
+# Possible values in the 'action' column of the transaction table.
+class TxnActions(object):
+  DELETE = '0'
+  PUT = '1'
+
 
 ###############################
 # Generic Datastore Exceptions

@@ -13,11 +13,6 @@ fi
 
 set -e
 
-# Update the packages list and cache.
-echo -n "Updating package list and cache ..."
-${PKG_CMD} update > /dev/null
-echo "done."
-
 # We need to make sure we have lsb-release, before we use it. On
 # streamlined images (like docker) it may not be present.
 if ! which lsb_release > /dev/null ; then
@@ -63,6 +58,18 @@ if grep docker /proc/1/cgroup > /dev/null ; then
 fi
 
 export APPSCALE_HOME_RUNTIME=`pwd`
+export CONFIG_DIR="/etc/appscale"
+
+# Wheezy does not have HAProxy in its main repositories.
+if [ "${DIST}" = "wheezy" ]; then
+    echo deb http://httpredir.debian.org/debian wheezy-backports main > \
+      /etc/apt/sources.list.d/backports.list
+    curl https://haproxy.debian.net/bernat.debian.org.gpg | apt-key add -
+fi
+
+echo -n "Updating package list and cache ..."
+${PKG_CMD} update > /dev/null
+echo "done."
 
 # This will install dependencies from control.$DIST (ie distro specific
 # packages).
@@ -80,7 +87,8 @@ if ! ${PKG_CMD} remove --purge -y --force-yes ${PACKAGES}; then
 fi
 
 # Let's make sure we use ruby 1.9.
-if [ "${DIST}" = "precise" ]; then
+case ${DIST} in
+    precise|wheezy)
         ${PKG_CMD} install -y ruby1.9.1 ruby1.9.1-dev rubygems1.9.1 irb1.9.1 \
             ri1.9.1 rdoc1.9.1 build-essential libopenssl-ruby1.9.1 libssl-dev \
             zlib1g-dev
@@ -91,13 +99,14 @@ if [ "${DIST}" = "precise" ]; then
             --slave /usr/bin/irb irb /usr/bin/irb1.9.1 \
             --slave /usr/bin/rdoc rdoc /usr/bin/rdoc1.9.1
         update-alternatives --install /usr/bin/gem gem /usr/bin/gem1.9.1 400
-fi
+        ;;
+esac
 
 # Since the last step in appscale_build.sh is to create the certs directory,
 # its existence indicates that appscale has already been installed.
-if [ -d appscale/.appscale/certs ]; then
+if [ -d ${CONFIG_DIR}/certs ]; then
         # Version 2.3.1 and prior didn't have /etc/appscale/VERSION.
-        WHERE_IS_VERSION="/etc/appscale/VERSION"
+        WHERE_IS_VERSION="${CONFIG_DIR}/VERSION"
         if [ ! -e ${WHERE_IS_VERSION} ]; then
                 WHERE_IS_VERSION="appscale/VERSION"
         fi
@@ -162,7 +171,7 @@ else
     bash debian/appscale_install.sh all || exit 1
 fi
 
-if ! mkdir -p $APPSCALE_HOME_RUNTIME/.appscale/certs; then
+if ! mkdir -p ${CONFIG_DIR}/certs; then
     echo "Unable to complete AppScale installation."
     exit 1
 fi

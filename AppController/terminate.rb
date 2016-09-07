@@ -14,14 +14,23 @@ module TerminateHelper
     `rm -f ~/.appscale_cookies`
     `rm -f /var/appscale/*.pid`
     `rm -f /etc/nginx/sites-enabled/*.conf`
-    `rm -f /etc/haproxy/sites-enabled/*.conf`
+    `rm -f /etc/haproxy/sites-enabled/*.cfg`
     `service nginx reload`
     # Stop and then remove the service we configured with monit.
     `monit stop all`
+    while system("monit summary | grep Running > /dev/null") do
+      puts "Waiting for monit to stop services ..."
+      Kernel.sleep(2)
+    end
+
     `rm -f /etc/monit/conf.d/appscale*.cfg`
     `rm -f /etc/monit/conf.d/controller-17443.cfg`
+
+    `rm -f /etc/logrotate.d/appscale-*`
+
+    # Let's make sure we restart any non-appscale service.
     `service monit restart`
-    `killall -9 -g -r djinnServer`
+    `/usr/bin/python2 /root/appscale/scripts/stop_service.py /root/appscale/AppController/djinnServer.rb /usr/bin/ruby`
     `monit start all`
     `rm -f #{APPSCALE_CONFIG_DIR}/port-*.txt`
     `rm -f #{APPSCALE_CONFIG_DIR}/search_ip`
@@ -35,18 +44,27 @@ module TerminateHelper
   # This functions does erase more of appscale state: used in combination
   # with 'clean'.
   def self.erase_appscale_full_state
-    `rm -rf /var/log/appscale/cassandra`
-    `rm -rf /var/log/appscale/celery_workers`
-    `rm -f /var/log/appscale/*`
+    # Delete logs.
+    `rm -rf /var/log/appscale/*`
+    `rm -rf /var/log/rabbitmq/*`
+    `rm -rf /var/log/zookeeper/*`
+    `rm -rf /var/log/nginx/appscale-*`
 
-    # TODO: It may be wise to save the apps for when AppScale starts up
-    # later.
+    # Delete running state.
     `rm -rf /var/apps/`
     `rm -rf #{APPSCALE_CONFIG_DIR}/*.pid`
     `rm -rf /tmp/ec2/*`
     `rm -rf /tmp/*started`
-  end
 
+    # Delete stored data.
+    `rm -rf /opt/appscale/cassandra`
+    `rm -rf /opt/appscale/zookeeper`
+    `rm -rf /opt/appscale/apps`
+    `rm -rf /opt/appscale/solr`
+    `rm -rf /var/lib/rabbitmq/*`
+    `rm -rf /etc/appscale/celery/`
+    `rm -rf /opt/appscale/celery`
+  end
 
   # Tells any services that persist data across AppScale runs to stop writing
   # new data to the filesystem, since killing them is imminent.
@@ -59,23 +77,16 @@ module TerminateHelper
     bound_addrs.delete("127.0.0.1")
     ip = bound_addrs[0]
 
-    `/root/appscale/AppDB/cassandra/cassandra/bin/nodetool -h #{ip} -p 7070 drain`
+    # Make sure we have cassandra running, otherwise nodetool may get
+    # stuck.
+    if system("monit summary | grep cassandra | grep Running > /dev/null")
+      `/opt/cassandra/cassandra/bin/nodetool -h #{ip} -p 7199 drain`
+    end
 
     # Next, stop ZooKeeper politely: we stop it with both new and old
     # script to be sure.
     `service zookeeper-server stop`
     `service zookeeper stop`
-  end
-
-
-  # Erases all data stored in the Datastore (Cassandra + ZooKeeper).
-  def self.erase_database_state
-    `rm -rf /var/appscale/cassandra`
-    `rm -rf /opt/appscale/cassandra`
-    `rm -rf /opt/appscale/zookeeper`
-    `rm -rf /opt/appscale/apps`
-    `rm -rf /opt/appscale/celery`
-    `rm -rf /opt/appscale/solr`
   end
 end
 
@@ -85,7 +96,6 @@ if __FILE__ == $0
   TerminateHelper.erase_appscale_state
 
   if ARGV.length == 1 and ARGV[0] == "clean"
-    TerminateHelper.erase_database_state
     TerminateHelper.erase_appscale_full_state
   end
 end

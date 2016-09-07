@@ -1,5 +1,6 @@
 """ This service starts and stops application servers of a given application. """
 
+import glob
 import json
 import logging
 import math
@@ -19,8 +20,12 @@ import appscale_info
 import constants
 import file_io
 import monit_app_configuration
+from monit_app_configuration import MONIT_CONFIG_DIR
 import monit_interface
 import misc
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '../AppServer'))
+from google.appengine.api.appcontroller_client import AppControllerClient
 
 # The amount of seconds to wait for an application to start up.
 START_APP_TIMEOUT = 180
@@ -73,9 +78,6 @@ PHP_CGI_LOCATION = "/usr/bin/php-cgi"
 DATASTORE_PATH = "localhost"
 
 HTTP_OK = 200
-
-# The AppController's response if it's not ready to add routing yet.
-NOT_READY = 'false: not ready yet'
 
 # The amount of seconds to wait before retrying to add routing.
 ROUTING_RETRY_INTERVAL = 5
@@ -141,7 +143,7 @@ def add_routing(app, port):
 
   while True:
     result = acc.add_routing_for_appserver(app, appserver_ip, port)
-    if result == NOT_READY:
+    if result == AppControllerClient.NOT_READY:
       logging.info('AppController not yet ready to add routing.')
       time.sleep(ROUTING_RETRY_INTERVAL)
     else:
@@ -182,7 +184,7 @@ def start_app(config):
     PID of process on success, -1 otherwise
   """
   config = convert_config_from_json(config)
-  if config == None:
+  if config is None:
     logging.error("Invalid configuration for application")
     return BAD_PID
 
@@ -285,7 +287,8 @@ def setup_logrotate(app_name, watch, log_size):
     True on success, False otherwise.
   """
   # Write application specific logrotation script.
-  app_logrotate_script = "{0}/appscale-{1}".format(LOGROTATE_CONFIG_DIR, app_name)
+  app_logrotate_script = "{0}/appscale-{1}".\
+    format(LOGROTATE_CONFIG_DIR, app_name)
 
   # Application logrotate script content.
   contents = """/var/log/appscale/{watch}*.log {{
@@ -298,7 +301,8 @@ def setup_logrotate(app_name, watch, log_size):
   copytruncate
 }}
 """.format(watch=watch, size=log_size)
-  logging.debug("Logrotate file: {} - Contents:\n{}".format(app_logrotate_script, contents))
+  logging.debug("Logrotate file: {} - Contents:\n{}".
+    format(app_logrotate_script, contents))
 
   with open(app_logrotate_script, 'w') as app_logrotate_fd:
     app_logrotate_fd.write(contents)
@@ -310,10 +314,10 @@ def stop_app_instance(app_name, port):
       machine.
 
   Args:
-    app_name: Name of application to stop
-    port: The port the application is running on
+    app_name: A string, the name of application to stop.
+    port: The port the application is running on.
   Returns:
-    True on success, False otherwise
+    True on success, False otherwise.
   """
   if not misc.is_app_name_valid(app_name):
     logging.error("Unable to kill app process %s on port %d because of " \
@@ -332,14 +336,13 @@ def stop_app_instance(app_name, port):
 
   # Now that the AppServer is stopped, remove its monit config file so that
   # monit doesn't pick it up and restart it.
-  monit_config_file = "/etc/monit/conf.d/{0}.cfg".format(watch)
+  monit_config_file = '{}/appscale-{}.cfg'.format(MONIT_CONFIG_DIR, watch)
   try:
     os.remove(monit_config_file)
   except OSError as os_error:
     logging.error("Error deleting {0}".format(monit_config_file))
 
   return True
-
 
 def restart_app_instances_for_app(app_name, language):
   """ Restarts all instances of a Google App Engine application on this machine.
@@ -381,6 +384,39 @@ def stop_app(app_name):
 
   if not monit_result:
     logging.error("Unable to shut down monit interface for watch %s" % watch)
+    return False
+
+  # Remove the monit config files for the application.
+  # TODO: Reload monit to pick up config changes.
+  config_files = glob.glob('{}/appscale-{}-*.cfg'.format(MONIT_CONFIG_DIR, watch))
+  for config_file in config_files:
+    try:
+      os.remove(config_file)
+    except OSError:
+      logging.exception('Error removing {}'.format(config_file))
+
+  if not remove_logrotate(app_name):
+    logging.error("Error while setting up log rotation for application: {}".
+      format(app_name))
+
+  return True
+
+def remove_logrotate(app_name):
+  """ Removes logrotate script for the given application.
+
+  Args:
+    app_name: A string, the name of the application to remove logrotate for.
+  Returns:
+    True on success, False otherwise.
+  """
+  app_logrotate_script = "{0}/appscale-{1}".\
+    format(LOGROTATE_CONFIG_DIR, app_name)
+  logging.debug("Removing script: {}".format(app_logrotate_script))
+
+  try:
+    os.remove(app_logrotate_script)
+  except OSError:
+    logging.error("Error deleting {0}".format(app_logrotate_script))
     return False
 
   return True
@@ -655,7 +691,6 @@ def create_java_start_cmd(app_name, port, load_balancer_host):
   # local FS and see what port it's running on. The value doesn't matter.
   cmd = [
     "cd " + constants.JAVA_APPSERVER + " &&",
-    "./genKeystore.sh &&",
     "./appengine-java-sdk-repacked/bin/dev_appserver.sh",
     "--port=" + str(port),
     #this jvm flag allows javax.email to connect to the smtp server

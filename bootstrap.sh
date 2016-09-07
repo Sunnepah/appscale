@@ -186,10 +186,11 @@ if [ -d appscale/.appscale/certs ]; then
 
         # We can pull a tag only if we are on the master branch.
         CURRENT_BRANCH="$(cd appscale; git branch --no-color | grep '^*' | cut -f 2 -d ' ')"
-        if [ "${CURRENT_BRANCH}" != "master" ]; then
+        if [ "${CURRENT_BRANCH}" != "master" ] && \
+           (cd appscale; git tag -l | grep $(git describe)) ; then
                 CURRENT_BRANCH="$(cd appscale; git tag -l | grep $(git describe))"
                 if [ "${CURRENT_BRANCH}" = "${GIT_TAG}" ]; then
-                        echo "AppScale is at the latest release already."
+                        echo "AppScale is already at the specified release."
                         exit 0
                 fi
         fi
@@ -245,11 +246,23 @@ if [ -d appscale/.appscale/certs ]; then
 
         # Let's upgrade the repository: if GIT_TAG is empty we are on HEAD.
         if [ -n "${GIT_TAG}" ]; then
+                set +e
                 (cd appscale; git checkout "$GIT_TAG")
+                if [ $? -gt 0 ]; then
+                    echo "Please stash your local unsaved changes and checkout the version of AppScale you are currently using to fix this error."
+                    echo "e.g.: git stash; git checkout <AppScale-version>"
+                    exit 1
+                fi
                 (cd appscale-tools; git checkout "$GIT_TAG")
+                if [ $? -gt 0 ]; then
+                    echo "Please stash your local unsaved changes and checkout the version of AppScale you are currently using to fix this error."
+                    echo "e.g.: git stash; git checkout <AppScale-version>"
+                    exit 1
+                fi
         else
                 (cd appscale; git pull)
                 (cd appscale-tools; git pull)
+                set -e
         fi
 fi
 
@@ -283,7 +296,6 @@ fi
 
 # Let's source the profles so this image can be used right away.
 . /etc/profile.d/appscale.sh
-. /etc/profile.d/appscale-tools.sh
 
 echo "*****************************************"
 echo "AppScale and AppScale tools are installed"

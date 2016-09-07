@@ -50,9 +50,8 @@ class TestDjinn < Test::Unit::TestCase
     assert_equal(BAD_SECRET_MSG, djinn.is_done_loading(@secret))
     assert_equal(BAD_SECRET_MSG, djinn.get_role_info(@secret))
     assert_equal(BAD_SECRET_MSG, djinn.get_app_info_map(@secret))
-    assert_equal(BAD_SECRET_MSG, djinn.kill(@secret))
+    assert_equal(BAD_SECRET_MSG, djinn.kill(false, @secret))
     assert_equal(BAD_SECRET_MSG, djinn.set_parameters("", "", "", @secret))
-    assert_equal(BAD_SECRET_MSG, djinn.set_apps([], @secret))
     assert_equal(BAD_SECRET_MSG, djinn.status(@secret))
     assert_equal(BAD_SECRET_MSG, djinn.get_stats(@secret))
     assert_equal(BAD_SECRET_MSG, djinn.stop_app(@app, @secret))
@@ -145,7 +144,7 @@ class TestDjinn < Test::Unit::TestCase
     assert_equal(true, result_2.include?("Error: database_credentials"))
 
     result_3 = djinn.set_parameters("", [], bad_param, @secret)
-    assert_equal(true, result_3.include?("Error: app_names"))
+    assert_equal(true, result_3.include?("Error: apps"))
 
     # Since DB credentials will be turned from an Array to a Hash,
     # it should have an even number of items in it
@@ -214,21 +213,6 @@ class TestDjinn < Test::Unit::TestCase
     assert_equal(expected, actual)
   end
 
-  def test_set_apps
-    flexmock(Djinn).new_instances { |instance|
-      instance.should_receive(:valid_secret?).and_return(true)
-    }
-    djinn = Djinn.new
-
-    bad_app_list = "boo, foo"
-    expected_bad_result = "app names was not an Array but was a String"
-    assert_equal(expected_bad_result, djinn.set_apps(bad_app_list, @secret))
-
-    good_app_list = ["boo", "foo"]
-    expected_good_result = "App names is now boo, foo"
-    assert_equal(expected_good_result, djinn.set_apps(good_app_list, @secret))
-  end
-
   def test_taskqueue_master
     # TaskQueue master nodes should configure and deploy RabbitMQ/celery on their node
 
@@ -246,7 +230,8 @@ class TestDjinn < Test::Unit::TestCase
     djinn.nodes = [DjinnJobData.new(master_role, "appscale")]
 
     # Set the clear_datastore option.
-    djinn.options = { 'clear_datastore' => 'false' }
+    djinn.options = {'clear_datastore' => 'false',
+                     'verbose' => 'false'}
 
     # make sure we write the secret to the cookie file
     # throw in Proc as the last arg to the mock since we don't care about what
@@ -287,7 +272,8 @@ class TestDjinn < Test::Unit::TestCase
     djinn.nodes = [DjinnJobData.new(master_role, "appscale"), DjinnJobData.new(slave_role, "appscale")]
 
     # Set the clear_datastore option.
-    djinn.options = { 'clear_datastore' => 'false' }
+    djinn.options = {'clear_datastore' => 'false',
+                     'verbose' => 'false'}
 
     # make sure we write the secret to the cookie file
     # throw in Proc as the last arg to the mock since we don't care about what
@@ -330,6 +316,8 @@ class TestDjinn < Test::Unit::TestCase
     djinn.nodes = [my_node]
 
     baz = flexmock("baz")
+    baz.should_receive(:connected?).and_return(false)
+    baz.should_receive(:close!)
     all_ok = {:rc => 0}
 
     # Mocks for lock acquire / release
@@ -430,6 +418,8 @@ class TestDjinn < Test::Unit::TestCase
     all_ok = {:rc => 0, :stat => flexmock(:exists => true)}
 
     baz = flexmock("baz")
+    baz.should_receive(:connected?).and_return(false)
+    baz.should_receive(:close!)
 
     # Mocks for lock acquisition / release
     baz.should_receive(:get).with(
@@ -514,6 +504,8 @@ class TestDjinn < Test::Unit::TestCase
     boo = 1
 
     mocked_zk = flexmock("zk")
+    mocked_zk.should_receive(:connected?).and_return(false)
+    mocked_zk.should_receive(:close!)
 
     # Mocks for Appcontroller root node
     file_exists = {:rc => 0, :data => ZKInterface::DUMMY_DATA,
@@ -980,26 +972,6 @@ class TestDjinn < Test::Unit::TestCase
     flexmock(HelperFunctions).should_receive(:shell).with("ifconfig").
       and_return("inet addr:1.2.3.4 ")
 
-    node_info = "1.2.3.3:1.2.3.3:shadow:login:i-000000:cloud1"
-    node = DjinnJobData.new(node_info, "boo")
-
-    djinn = Djinn.new()
-    djinn.nodes = [node]
-    djinn.my_index = 0
-
-    # mock out sending the request info
-    flexmock(Net::HTTP).new_instances { |instance|
-      instance.should_receive(:post).with("/apps/bazapp", String, Hash)
-    }
-
-    assert_equal(true, djinn.send_request_info_to_dashboard("bazapp", 0, 0))
-  end
-
-  def test_send_request_info_to_dashboard_when_dash_is_up
-    # mock out getting our ip address
-    flexmock(HelperFunctions).should_receive(:shell).with("ifconfig").
-      and_return("inet addr:1.2.3.4 ")
-
     node_info = {
       "public_ip" => "1.2.3.3",
       "private_ip" => "1.2.3.3",
@@ -1014,7 +986,8 @@ class TestDjinn < Test::Unit::TestCase
 
     # mock out sending the request info
     flexmock(Net::HTTP).new_instances { |instance|
-      instance.should_receive(:post).with("/apps/bazapp", String, Hash).and_raise(Exception)
+      instance.should_receive(:post).with("/apps/json/bazapp", String, Hash).
+        and_raise(StandardError)
     }
 
     assert_equal(false, djinn.send_request_info_to_dashboard("bazapp", 0, 0))
@@ -1121,7 +1094,7 @@ class TestDjinn < Test::Unit::TestCase
     role = {
       "public_ip" => "public_ip",
       "private_ip" => "private_ip",
-      "jobs" => ["login"],
+      "jobs" => ["login","shadow"],
       "instance_id" => "instance_id"
     }
 
@@ -1131,6 +1104,12 @@ class TestDjinn < Test::Unit::TestCase
     my_node = DjinnJobData.new(role, "appscale")
     djinn.nodes = [my_node]
     djinn.app_info_map = {
+      'myapp' => {
+        'nginx' => 8081,
+        'nginx_https' => 4381,
+        'haproxy' => 10001,
+        'appengine' => ["1.2.3.4:20001"]
+      },
       'another-app' => {
         'nginx' => 80,
         'nginx_https' => 443,
@@ -1154,7 +1133,7 @@ class TestDjinn < Test::Unit::TestCase
     role = {
       "public_ip" => "public_ip",
       "private_ip" => "private_ip",
-      "jobs" => ["login"],
+      "jobs" => ["login","shadow"],
       "instance_id" => "instance_id"
     }
 
@@ -1164,6 +1143,12 @@ class TestDjinn < Test::Unit::TestCase
     my_node = DjinnJobData.new(role, "appscale")
     djinn.nodes = [my_node]
     djinn.app_info_map = {
+      'myapp' => {
+        'nginx' => 8081,
+        'nginx_https' => 4381,
+        'haproxy' => 10001,
+        'appengine' => ["1.2.3.4:20001"]
+      },
       'another-app' => {
         'nginx' => 80,
         'nginx_https' => 443,
@@ -1187,7 +1172,7 @@ class TestDjinn < Test::Unit::TestCase
     role = {
       "public_ip" => "public_ip",
       "private_ip" => "private_ip",
-      "jobs" => ["login"],
+      "jobs" => ["login","shadow"],
       "instance_id" => "instance_id"
     }
 
@@ -1197,6 +1182,12 @@ class TestDjinn < Test::Unit::TestCase
     my_node = DjinnJobData.new(role, "appscale")
     djinn.nodes = [my_node]
     djinn.app_info_map = {
+      'myapp' => {
+        'nginx' => 8081,
+        'nginx_https' => 4381,
+        'haproxy' => 10001,
+        'appengine' => ["1.2.3.4:20001"]
+      },
       'another-app' => {
         'nginx' => 80,
         'nginx_https' => 443,
@@ -1220,7 +1211,7 @@ class TestDjinn < Test::Unit::TestCase
     role = {
       "public_ip" => "public_ip",
       "private_ip" => "private_ip",
-      "jobs" => ["login"],
+      "jobs" => ["login","shadow"],
       "instance_id" => "instance_id"
     }
 
@@ -1230,6 +1221,12 @@ class TestDjinn < Test::Unit::TestCase
     my_node = DjinnJobData.new(role, "appscale")
     djinn.nodes = [my_node]
     djinn.app_info_map = {
+      'myapp' => {
+        'nginx' => 8081,
+        'nginx_https' => 4381,
+        'haproxy' => 10001,
+        'appengine' => ["1.2.3.4:20000"]
+      },
       'another-app' => {
         'nginx' => 80,
         'nginx_https' => 443,
@@ -1262,14 +1259,6 @@ class TestDjinn < Test::Unit::TestCase
     djinn.state = "AppController is taking it easy today"
     state_only = JSON.dump({'state' => djinn.state})
     assert_equal(state_only, djinn.get_property('state', @secret))
-
-    # Check that we can get the userappserver_ip.
-    djinn.userappserver_ip = "private-ip"
-    userappserver_ips = JSON.dump({
-      'userappserver_ip' => 'private-ip'
-    })
-    assert_equal(userappserver_ips['private-ip'], djinn.get_property('userappserver_ip',
-      @secret)['private-ip'])
   end
 
 
@@ -1348,4 +1337,143 @@ class TestDjinn < Test::Unit::TestCase
   end
 
 
+  def get_djinn_mock
+    role = {
+        "public_ip" => "my public ip",
+        "private_ip" => "my private ip",
+        "jobs" => ["login"]
+    }
+    djinn = flexmock(Djinn.new())
+    djinn.my_index = 0
+    djinn.nodes = [DjinnJobData.new(role, "appscale")]
+    djinn.last_updated = 0
+    djinn.done_loading = true
+    djinn
+  end
+
+
+  def test_does_app_exist
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    app_exists = true
+    appname = 'app1'
+
+    flexmock(UserAppClient).new_instances.should_receive(:does_app_exist? => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.does_app_exist(appname, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(app_exists, djinn.does_app_exist(appname, good_secret))
+  end
+
+
+  def test_reset_password
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    username = 'user'
+    password = 'password'
+    change_pwd_success = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:change_password => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.reset_password(username, password, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(change_pwd_success, djinn.reset_password(username, password, good_secret))
+  end
+
+
+  def test_does_user_exist
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    username = 'user'
+    user_exists = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:does_user_exist? => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.does_user_exist(username, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(user_exists, djinn.does_user_exist(username, good_secret))
+  end
+
+
+  def test_create_user
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    username = 'user'
+    password = 'password'
+    account_type = 'account_type'
+    create_user_success = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:commit_new_user => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.create_user(username, password, account_type, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(create_user_success, djinn.create_user(username, password, account_type, good_secret))
+  end
+
+
+  def test_set_admin_role
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    username = 'user'
+    is_cloud_admin = 'true'
+    capabilities = 'admin_capabilties'
+    set_admin_role_success = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:set_admin_role => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.set_admin_role(username, is_cloud_admin, capabilities, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(set_admin_role_success, djinn.set_admin_role(username, is_cloud_admin, capabilities, good_secret))
+  end
+
+
+  def test_get_app_data
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    app_id = 'app1'
+    get_app_data_success = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:get_app_data => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.get_app_data(app_id, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(get_app_data_success, djinn.get_app_data(app_id, good_secret))
+  end
+
+
+  def test_reserve_app_id
+    good_secret = 'good_secret'
+    bad_secret = 'bad_secret'
+    username = 'user'
+    app_id = 'app1'
+    app_language = 'python'
+    reserve_app_id_success = true
+
+    flexmock(UserAppClient).new_instances.should_receive(:commit_new_app_name => true)
+
+    djinn = get_djinn_mock
+    djinn.should_receive(:valid_secret?).with(bad_secret).and_return(false)
+    assert_equal(BAD_SECRET_MSG, djinn.reserve_app_id(username, app_id, app_language, bad_secret))
+
+    djinn.should_receive(:valid_secret?).with(good_secret).and_return(true)
+    assert_equal(reserve_app_id_success, djinn.reserve_app_id(username, app_id, app_language, good_secret))
+  end
 end

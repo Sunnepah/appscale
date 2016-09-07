@@ -28,27 +28,27 @@ namespace :appcontroller do
 
 end
 
-
-namespace :python do
-
+namespace :appmanager do
+  
   task :test do
-    sh "bash ts_python.sh"
+   sh 'python -m unittest discover -b -v -s AppManager/test/unit'
   end
 
 end
 
-namespace :appmanager do
-  
-  task :test do
-   sh "nosetests AppManager/test/unit"
-  end
+namespace :apps do
 
+  task :test do
+    sh 'python -m unittest discover -b -v -s Apps/sensor/tests'
+    sh 'python -m unittest discover -b -v -s Apps/sensor/common/tests'
+  end
+  
 end
 
 namespace :infrastructuremanager do
 
   task :test do
-    sh "nosetests InfrastructureManager"
+    sh 'python -m unittest discover -b -v -s InfrastructureManager'
   end
 
 end
@@ -56,7 +56,7 @@ end
 namespace :appdb do
 
   task :test do
-    sh "nosetests AppDB/test/unit"
+    sh 'python -m unittest discover -b -v -s AppDB/test/unit'
   end
 
 end
@@ -64,7 +64,16 @@ end
 namespace :apptaskqueue do
 
   task :test do
-    sh "nosetests AppTaskQueue/test/unit"
+    sh 'python -m unittest discover -b -v -s AppTaskQueue/test/unit'
+  end
+
+end
+
+namespace :go do
+
+  task :test do
+    goroot = '/root/appscale/AppServer/goroot'
+    sh "PATH=#{goroot}/bin:${PATH}; cd #{goroot}/src; ./run.bash --no-rebuild"
   end
 
 end
@@ -72,7 +81,7 @@ end
 namespace :hermes do
 
   task :test do
-    sh "nosetests Hermes/test/unit"
+    sh 'python -m unittest discover -b -v -s Hermes/test/unit'
   end
 
 end
@@ -80,7 +89,7 @@ end
 namespace :searchservice do
 
   task :test do
-    sh "nosetests SearchService/test/unit"
+    sh 'python -m unittest discover -b -v -s SearchService/test/unit'
   end
 
 end
@@ -88,8 +97,10 @@ end
 namespace :appserver do
 
   task :test do
-    sh "nosetests AppServer/google/appengine/api/taskqueue/test " +
-      "AppServer/google/appengine/api/xmpp/test"
+    sh 'python -m unittest discover -b -v '\
+      '-s AppServer/google/appengine/api/taskqueue/test'
+    sh 'python -m unittest discover -b -v '\
+      '-s AppServer/google/appengine/api/xmpp/test'
   end
 
 end
@@ -98,7 +109,7 @@ end
 namespace :lib do
 
   task :test do
-    sh "nosetests lib/test/unit"
+    sh 'python -m unittest discover -b -v -s lib/test/unit'
   end
 
 end
@@ -106,7 +117,7 @@ end
 namespace :appdashboard do
 
   task :test do
-    sh "python AppDashboard/test/unit/test_suite.py"
+    sh 'python -m unittest discover -b -v -s AppDashboard/test/unit'
   end
 
   task :coverage do |test|
@@ -131,9 +142,27 @@ namespace :xmppreceiver do
   end
 
   task :test do
-    sh "nosetests XMPPReceiver"
+    sh 'python -m unittest discover -b -v -s XMPPReceiver/test'
   end
 
 end
 
-task :default => ['appcontroller:test', 'infrastructuremanager:test', 'appmanager:test', 'appdb:test', 'apptaskqueue:test', 'hermes:test', 'searchservice:test', 'lib:test', 'appserver:test', 'xmppreceiver:test', 'appdashboard:test']
+python_tests = [
+  'appdashboard:test',
+  'appdb:test',
+  'appmanager:test',
+  'appserver:test',
+  'apptaskqueue:test',
+  'hermes:test',
+  'infrastructuremanager:test',
+  'lib:test',
+  'searchservice:test',
+  'xmppreceiver:test',
+  'apps:test'
+]
+ruby_tests = ['appcontroller:test']
+go_tests = ['go:test']
+
+task :brief => python_tests + ruby_tests
+
+task :default => python_tests + ruby_tests + go_tests

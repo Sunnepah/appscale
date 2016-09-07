@@ -68,7 +68,6 @@ class AppControllerClient
     # Disable certificate verification.
     @conn.options["protocol.http.ssl_config.verify_mode"] = nil
     @conn.add_method("set_parameters", "djinn_locations", "database_credentials", "app_names", "secret")
-    @conn.add_method("set_apps", "app_names", "secret")
     @conn.add_method("set_apps_to_restart", "apps_to_restart", "secret")
     @conn.add_method("status", "secret")
     @conn.add_method("get_stats", "secret")
@@ -81,8 +80,8 @@ class AppControllerClient
     @conn.add_method("add_role", "new_role", "secret")
     @conn.add_method("remove_role", "old_role", "secret")
     @conn.add_method("get_queues_in_use", "secret")
-    @conn.add_method("add_appserver_process", "app_id", "secret")
-    @conn.add_method("remove_appserver_process", "app_id", "port", "secret")
+    @conn.add_method("set_node_read_only", "read_only", "secret")
+    @conn.add_method("primary_db_is_up", "secret")
   end
 
 
@@ -118,7 +117,7 @@ class AppControllerClient
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
           OpenSSL::SSL::SSLError, NotImplementedError, Errno::EPIPE,
-          Errno::ECONNRESET, SOAP::EmptyResponseError, Exception => e
+          Errno::ECONNRESET, SOAP::EmptyResponseError, StandardError => e
           if retry_on_except
             Kernel.sleep(1)
             Djinn.log_debug("[#{callr}] exception in make_call to " +
@@ -150,16 +149,6 @@ class AppControllerClient
     end
   end
 
-  def set_apps(app_names)
-    result = ""
-    make_call(10, ABORT_ON_FAIL, "set_apps") { 
-      result = conn.set_apps(app_names, @secret)
-    }  
-    if result =~ /Error:/
-      raise FailedNodeException.new("set_apps returned #{result}.")
-    end
-  end
-
   def status(print_output=true)
     status = get_status()
          
@@ -183,8 +172,10 @@ class AppControllerClient
     make_call(10, RETRY_ON_FAIL, "get_stats") { @conn.get_stats(@secret) }
   end
 
-  def upload_app(app)
-    make_call(30, RETRY_ON_FAIL, "upload_app") { @conn.upload_app(app, @secret) }
+  def upload_app(archived_file, file_suffix, email)
+    make_call(30, RETRY_ON_FAIL, "upload_app") {
+      @conn.upload_app(archived_file, file_suffix, email, @secret)
+    }
   end
 
   def stop_app(app_name)
@@ -236,15 +227,17 @@ class AppControllerClient
     }
   end
 
-  def add_appserver_process(app_id)
-    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "add_appserver_process") {
-      @conn.add_appserver_process(app_id, @secret)
+  # Enables or disables datastore writes on the remote database node.
+  def set_node_read_only(read_only)
+    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "set_node_read_only") {
+      @conn.set_node_read_only(read_only, @secret)
     }
   end
 
-  def remove_appserver_process(app_id, port)
-    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "remove_appserver_process") {
-      @conn.remove_appserver_process(app_id, port, @secret)
+  # Checks if the Cassandra seed node is up.
+  def primary_db_is_up()
+    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "primary_db_is_up") {
+      @conn.primary_db_is_up(@secret)
     }
   end
 

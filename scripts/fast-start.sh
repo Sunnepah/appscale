@@ -10,17 +10,23 @@
 # ssh -i <key> ubuntu@<public IP> 'curl -Lo - fast-start.appscale.com|sudo -i sh'
 #
 
+PATH="${PATH}:/usr/local/bin"
 ADMIN_EMAIL=""
 ADMIN_PASSWD=""
 PROVIDER=""
 CURL="$(which curl)"
 IP="$(which ip)"
-APPSCALE_CMD="/usr/local/appscale-tools/bin/appscale"
-APPSCALE_UPLOAD="/root/appscale-tools/bin/appscale-upload-app"
+APPSCALE_CMD="$(which appscale)"
+APPSCALE_UPLOAD="$(which appscale-upload-app)"
 GOOGLE_METADATA="http://169.254.169.254/computeMetadata/v1/instance/"
 GUESTBOOK_URL="http://www.appscale.com/wp-content/uploads/2014/07/guestbook.tar.gz"
 GUESTBOOK_APP="/root/guestbook.tar.gz"
 USE_DEMO_APP="Y"
+
+# On some system, when running this scipt from rc.local (ie at boot time)
+# there may not be any user set, which will cause ssh-copy-id to fail.
+# Forcing HOME to the default enables ssh-copy-id to operate normally.
+export HOME="/root"
 
 # Print help screen.
 usage() {
@@ -97,6 +103,8 @@ PRIVATE_IP=""
 if grep docker /proc/1/cgroup > /dev/null ; then
     # We need to start sshd by hand.
     /usr/sbin/sshd
+    # Force Start cron
+    /usr/sbin/cron 
     PROVIDER="Docker"
 elif lspci | grep VirtualBox > /dev/null ; then
     PROVIDER="VirtualBox"
@@ -205,6 +213,9 @@ if [ ! -e AppScalefile ]; then
     echo -n "Downloading sample app..."
     ${CURL} -Lso ${GUESTBOOK_APP} ${GUESTBOOK_URL}
     echo "done."
+else
+    # If AppScalefile is present, do not redeploy the demo app.
+    USE_DEMO_APP="N"
 fi
 
 # Start AppScale.

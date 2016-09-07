@@ -8,6 +8,7 @@ functions.
 
 import datetime
 import json
+import logging
 import os
 import re
 import sys
@@ -19,7 +20,7 @@ import appscale_datastore
 import SOAPpy
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../lib/"))
-import constants
+from constants import LOG_FORMAT
 import appscale_info
 
 # Name of the application table which stores AppScale application information.
@@ -157,8 +158,7 @@ class Apps:
     self.last_time_updated_date_ = str(self.creation_date_)
     self.cksum_ = "0"
     self.num_entries_ = "0"
-    self.enabled_ = "true"
-    self.classes_ = []
+    self.enabled_ = "false"
     self.indexes_ = "0"
     return
 
@@ -179,7 +179,6 @@ class Apps:
     appstring += "check_sum:" + str(self.cksum_) + "\n"
     appstring += "num_entries:" + str(self.num_entries_) + "\n"
     appstring += "enabled:" + str(self.enabled_) + "\n"
-    appstring += "classes:" + ':'.join(self.classes_) + "\n"
     appstring += "indexes:" + str(self.indexes_) + "\n"
     return appstring
 
@@ -187,15 +186,17 @@ class Apps:
     hosts = {}
     for index, host in enumerate(self.host_):
       ports = self.port_[index].split(PORT_SEPARATOR)
-      if len(ports) == 1:
-        ports[1] = ''
-      hosts[host] = {'http': ports[0], 'https': ports[1]}
+      hosts[host] = {'http': int(ports[0])}
+      if len(ports) > 1 and ports[1]:
+        hosts[host]['https'] = int(ports[1])
 
     response = {
       'hosts': hosts,
       'language': self.language_,
-      'owner': self.owner_,
     }
+    if self.owner_:
+      response['owner'] = self.owner_
+
     return json.dumps(response)
 
   def checksum(self):
@@ -206,10 +207,10 @@ class Apps:
     # order must match self.attributes
     # some entries must be converted to string format from arrays
     for ii in Apps.attributes_:
-      if ii == "admins_list" or ii == 'host' or ii == 'port' or ii == 'classes':
+      if ii == "admins_list" or ii == 'host' or ii == 'port':
         array.append(':'.join(getattr(self, ii + "_")))
       else:
-        array.append(str(getattr(self, ii+ "_")));
+        array.append(str(getattr(self, ii+ "_")))
 
     return array
 
@@ -233,10 +234,6 @@ class Apps:
     else:
       self.port_ = []
 
-    if self.classes_:
-      self.classes_ = self.classes_.split(':')
-    else:
-      self.classes_ = []
     return "true"
 
 def does_user_exist(username, secret):
@@ -247,6 +244,8 @@ def does_user_exist(username, secret):
   result = db.get_entity(USER_TABLE, username, ["email"])
   if result[0] in ERROR_CODES and len(result) == 2:
     return "true"
+  elif 'Exception' in result[0]:
+    return result[0]
   else:
     return "false"
 
@@ -467,34 +466,6 @@ def commit_tar(app_name, tar, secret):
     return error
   return "true"
 
-def delete_all_users(secret):
-  global db
-  global super_secret
-  global user_schema
-  users = []
-  if secret != super_secret:
-    return "Error: bad secret"
-
-  result = db.get_table(USER_TABLE, user_schema)
-  if result[0] not in ERROR_CODES:
-    return "false"
-
-  result = result[1:]
-  for ii in range(0, (len(result)/len(user_schema))):
-    partial = result[(ii * len(user_schema)): ((1 + ii) * len(user_schema))]
-    if len(partial) != len(user_schema):
-      pass
-    else:
-      u = Users("x", "x", "user")
-      u.unpackit(partial)
-      users.append(u)
-  ret = "true"
-  for ii in u:
-    result = db.delete_row(USER_TABLE, ii.email_)
-    if result[0] not in ERROR_CODES:
-      ret = "false"
-  return ret
-
 def delete_all_apps(secret):
   global db
   global super_secret
@@ -586,38 +557,6 @@ def add_instance(appname, host, port, https_port, secret):
     return "false"
   return "true"
 
-def add_class(appname, classname, namespace, secret):
-  global db
-  global super_secret
-  global app_schema
-  if secret != super_secret:
-    return "Error: bad secret"
-
-  columns = ["classes"]
-  result = db.get_entity(APP_TABLE, appname, columns)
-  error = result[0]
-  if error not in ERROR_CODES or len(columns) != (len(result) - 1):
-    return "Error: Unable to get entity for app"
-
-  result = result[1:]
-
-  if result[0]:
-    classes = result[0].split(':')
-  else:
-    classes = []
-  for c in classes:
-    if c == classname:
-      # already in classes list
-      return "true"
-
-  classes += [str(classname+"___"+namespace)]
-  classes = ':'.join(classes)
-
-  result = db.put_entity(APP_TABLE, appname, columns, [classes])
-  if result[0] not in ERROR_CODES:
-    return "false: Unable to put entity for app"
-  return "true"
-
 def delete_app(appname, secret):
   global db
   global super_secret
@@ -627,26 +566,11 @@ def delete_app(appname, secret):
   result = db.get_entity(APP_TABLE, appname, ["owner"])
   if result[0] not in ERROR_CODES or len(result) == 1:
     return "false: unable to get entity for app"
-  # look up all the class tables of this app and delete their tables
-  result = db.get_entity(APP_TABLE, appname, ["classes"])
-  if result[0] not in ERROR_CODES or len(result) == 1:
-    return "false: unable to get classes for app"
-  result = result[1:]
-  if result[0]:
-    classes = result[0].split(':')
-  else:
-    classes = []
-  result = db.put_entity(APP_TABLE, appname, ["host", "port"], ["", ""])
+
+  result = db.put_entity(APP_TABLE, appname,
+                         ["host", "port", "num_entries"], ["", "", "0"])
   if result[0] not in ERROR_CODES:
     return "false: unable to delete instances"
-
-  for classname in classes:
-    table_name = appname + "___" + classname
-    db.delete_table(table_name)
-
-  result = db.put_entity(APP_TABLE, appname, ["classes", "num_entries"], ["", "0"])
-  if result[0] not in ERROR_CODES:
-    return "Error: unable to clear classes"
 
   # disabling the app, a type of soft delete
   return disable_app(appname, secret)
@@ -937,6 +861,9 @@ def usage():
 
 if __name__ == "__main__":
   """ Main function for running the server. """
+  logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
+  logging.info('Starting UAServer')
+
   for ii in range(1, len(sys.argv)):
     if sys.argv[ii] in ("-h", "--help"):
       usage()
@@ -952,9 +879,10 @@ if __name__ == "__main__":
 
   db = appscale_datastore.DatastoreFactory.getDatastore(datastore_type)
   ERROR_CODES = appscale_datastore.DatastoreFactory.error_codes()
-  if not datastore_type in \
-    appscale_datastore.DatastoreFactory.valid_datastores():
-    exit(2)
+  valid_datastores = appscale_datastore.DatastoreFactory.valid_datastores()
+  if datastore_type not in valid_datastores:
+    raise Exception('{} not in valid datastores ({})'.
+                    format(datastore_type, valid_datastores))
 
   # Keep trying until it gets the schema.
   timeout = 5
@@ -977,12 +905,12 @@ if __name__ == "__main__":
 
   ip = "0.0.0.0"
   server = SOAPpy.SOAPServer((ip, bindport))
+  logging.info('Serving on {}'.format(bindport))
   # To debug this service, uncomment the 2 lines below.
   #server.config.dumpSOAPOut = 1
   #server.config.dumpSOAPIn = 1
 
   # Register soap functions.
-  server.registerFunction(add_class)
   server.registerFunction(add_instance)
   server.registerFunction(does_user_exist)
   server.registerFunction(does_app_exist)
@@ -1001,7 +929,6 @@ if __name__ == "__main__":
   server.registerFunction(commit_tar)
   server.registerFunction(commit_new_token)
   server.registerFunction(delete_instance)
-  server.registerFunction(delete_all_users)
   server.registerFunction(delete_all_apps)
   server.registerFunction(delete_user)
   server.registerFunction(delete_app)

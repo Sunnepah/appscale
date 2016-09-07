@@ -11,12 +11,23 @@ if [ -z "$APPSCALE_HOME_RUNTIME" ]; then
     export APPSCALE_HOME_RUNTIME=/opt/appscale
 fi
 
-if [ -z "$APPSCALE_PACKAGE_MIRROR" ]; then
+if [ -z "${APPSCALE_PACKAGE_MIRROR-}" ]; then
     export APPSCALE_PACKAGE_MIRROR=http://s3.amazonaws.com/appscale-build
+fi
+
+export UNAME_MACHINE=$(uname -m)
+if [ -z "${JAVA_HOME_DIRECTORY-}" ]; then
+    if [ "$UNAME_MACHINE" = "x86_64" ]; then
+        export JAVA_HOME_DIRECTORY=/usr/lib/jvm/java-7-openjdk-amd64
+    elif [ "$UNAME_MACHINE" = "armv7l" ] || [ "$UNAME_MACHINE" = "armv6l" ]; then
+        export JAVA_HOME_DIRECTORY=/usr/lib/jvm/java-7-openjdk-armhf
+    fi
 fi
 
 VERSION_FILE="$APPSCALE_HOME_RUNTIME"/VERSION
 export APPSCALE_VERSION=$(grep AppScale "$VERSION_FILE" | sed 's/AppScale version \(.*\)/\1/')
+
+PACKAGE_CACHE="/var/cache/appscale"
 
 
 pipwrapper ()
@@ -39,6 +50,21 @@ pipwrapper ()
         echo "Need an argument for pip!"
         exit 1
     fi
+}
+
+# Download a package from a mirror if it's not already cached.
+cachepackage() {
+    CACHED_FILE="${PACKAGE_CACHE}/$1"
+    mkdir -p ${PACKAGE_CACHE}
+    if [ -f ${CACHED_FILE} ]; then
+        MD5=($(md5sum ${CACHED_FILE}))
+        if [ "$MD5" = "$2" ]; then
+            return 0
+        fi
+    fi
+
+    echo "Fetching $1 from $APPSCALE_PACKAGE_MIRROR"
+    curl ${CURL_OPTS} -o ${CACHED_FILE} "${APPSCALE_PACKAGE_MIRROR}/$1"
 }
 
 # This function is to disable the specify service so that it won't start
@@ -138,9 +164,8 @@ installappscaleprofile()
     echo "Generating $DESTFILE"
     cat <<EOF | tee $DESTFILE
 export APPSCALE_HOME=${APPSCALE_HOME_RUNTIME}
-export PYTHON_EGG_CACHE=/tmp/.python_eggs
-export EC2_PRIVATE_KEY=\${APPSCALE_HOME}/.appscale/certs/mykey.pem
-export EC2_CERT=\${APPSCALE_HOME}/.appscale/certs/mycert.pem
+export EC2_PRIVATE_KEY=${CONFIG_DIR}/certs/mykey.pem
+export EC2_CERT=${CONFIG_DIR}/certs/mycert.pem
 export LC_ALL='en_US.UTF-8'
 EOF
 # This enables to load AppServer and AppDB modules. It must be before the python-support.
@@ -160,22 +185,22 @@ EOF
 EOF
 
     # This create link to appscale settings.
-    rm -rfv ${DESTDIR}/etc/appscale
+    rm -rfv ${DESTDIR}${CONFIG_DIR}
     mkdir -pv ~/.appscale
     mkdir -pv ${APPSCALE_HOME_RUNTIME}/.appscale
-    ln -sfv ${APPSCALE_HOME_RUNTIME}/.appscale ${DESTDIR}/etc/appscale
+    ln -sfv ${APPSCALE_HOME_RUNTIME}/.appscale ${DESTDIR}${CONFIG_DIR}
 
-    cat <<EOF | tee /etc/appscale/home || exit
+    cat <<EOF | tee ${CONFIG_DIR}/home || exit
 ${APPSCALE_HOME_RUNTIME}
 EOF
     # Create the global AppScale environment file.
-    DESTFILE=${DESTDIR}/etc/appscale/environment.yaml
+    DESTFILE=${DESTDIR}${CONFIG_DIR}/environment.yaml
     mkdir -pv $(dirname $DESTFILE)
     echo "Generating $DESTFILE"
     cat <<EOF | tee $DESTFILE
 APPSCALE_HOME: ${APPSCALE_HOME_RUNTIME}
 EC2_HOME: /usr/local/ec2-api-tools
-JAVA_HOME: /usr/lib/jvm/java-7-openjdk-amd64
+JAVA_HOME: ${JAVA_HOME_DIRECTORY}
 EOF
     mkdir -pv /var/log/appscale
     # Allow rsyslog to write to appscale log directory.
@@ -198,59 +223,39 @@ EOF
     chmod +x $LOGROTATE_HOURLY
 }
 
-installthrift()
-{
-    if [ "$DIST" = "precise" ]; then
-        pipwrapper thrift
-    fi
-}
-
 installjavajdk()
 {
     # This makes jdk-7 the default JVM.
-    update-alternatives --set java /usr/lib/jvm/java-7-openjdk-amd64/jre/bin/java
+    update-alternatives --set java ${JAVA_HOME_DIRECTORY}/jre/bin/java
 }
 
 installappserverjava()
 {
+    JAVA_SDK_DIR="${APPSCALE_HOME}/AppServer_Java"
+
+    JAVA_SDK_PACKAGE="appengine-java-sdk-1.8.4.zip"
+    JAVA_SDK_PACKAGE_MD5="f5750b0c836870a3089096fd537a1272"
+    cachepackage ${JAVA_SDK_PACKAGE} ${JAVA_SDK_PACKAGE_MD5}
+    unzip "${PACKAGE_CACHE}/${JAVA_SDK_PACKAGE}" -d ${JAVA_SDK_DIR}
+
     # Compile source file.
-    cd ${APPSCALE_HOME}/AppServer_Java
-    ant install
-    ant clean-build
+    (cd ${JAVA_SDK_DIR} && ant install && ant clean-build)
 
     if [ -n "$DESTDIR" ]; then
         # Delete unnecessary files.
-	rm -rfv src lib
+        rm -rf ${JAVA_SDK_DIR}/src ${JAVA_SDK_DIR}/lib
     fi
 }
 
 installtornado()
 {
-    if [ "$DIST" = "precise" ]; then
-        pipwrapper tornado
-        DISTP=/usr/local/lib/python2.7/dist-packages
-        if [ -z "$(find ${DISTP} -name tornado-*.egg*)" ]; then
-            echo "Fail to install python tornado. Please retry."
-            exit 1
-        fi
-        if [ -n "$DESTDIR" ]; then
-            mkdir -pv ${DESTDIR}${DISTP}
-            cp -rv ${DISTP}/tornado-*.egg* ${DESTDIR}${DISTP}
-        fi
-    fi
+    pipwrapper tornado
 }
 
 installflexmock()
 {
     if [ "$DIST" = "precise" ]; then
         pipwrapper flexmock
-    fi
-}
-
-postinstalltornado()
-{
-    if [ "$DIST" = "precise" ]; then
-        pipwrapper tornado
     fi
 }
 
@@ -273,10 +278,10 @@ installgems()
     # ZK 1.0 breaks our existing code - upgrade later.
     gem install zookeeper
     sleep 1
-    gem install json ${GEMOPT}
+    gem install json ${GEMOPT} -v 1.8.3
     sleep 1
     gem install soap4r-ruby1.9 ${GEMOPT}
-    gem install httparty ${GEMOPT}
+    gem install httparty ${GEMOPT} -v 0.13.7
     gem install httpclient ${GEMOPT}
     # This is for the unit testing framework.
     gem install simplecov ${GEMOPT}
@@ -286,11 +291,10 @@ installphp54()
 {
     # In Precise we have a too old version of php. We need at least 5.4.
     if [ "$DIST" = "precise" ]; then
-        add-apt-repository -y ppa:ondrej/php5-oldstable
+        LC_ALL=C.UTF-8 add-apt-repository ppa:ondrej/php
         apt-get update
-        # We need to pull also php5-cgi to ensure apache2 won't be pulled
-        # in.
-        apt-get install --force-yes -y php5-cgi php5
+        # php5-cgi is needed to ensure apache2 won't be installed.
+        apt-get install --force-yes -y php5-cgi php5.5
     fi
 }
 
@@ -304,41 +308,43 @@ postinstallnginx()
 installsolr()
 {
     SOLR_VER=4.10.2
-    mkdir -p ${APPSCALE_HOME}/SearchService/solr
-    cd ${APPSCALE_HOME}/SearchService/solr
-    rm -rfv solr
-    curl ${CURL_OPTS} -o solr-${SOLR_VER}.tgz $APPSCALE_PACKAGE_MIRROR/solr-${SOLR_VER}.tgz
-    tar zxvf solr-${SOLR_VER}.tgz
-    mv -v solr-${SOLR_VER} solr
-    rm -fv solr-${SOLR_VER}.tgz
+    SOLR_DIR="${APPSCALE_HOME}/SearchService/solr"
+    mkdir -p ${SOLR_DIR}
+    rm -rf "${SOLR_DIR}/solr"
+
+    SOLR_PACKAGE="solr-${SOLR_VER}.tgz"
+    SOLR_PACKAGE_MD5="a24f73f70e3fcf6aa8fda67444981f78"
+    cachepackage ${SOLR_PACKAGE} ${SOLR_PACKAGE_MD5}
+    tar xzf "${PACKAGE_CACHE}/${SOLR_PACKAGE}" -C ${SOLR_DIR}
+    mv -v ${SOLR_DIR}/solr-${SOLR_VER} ${SOLR_DIR}/solr
 }
 
 installcassandra()
 {
-    CASSANDRA_VER=2.0.7
-    PYCASSA_VER=1.9.1
-    
-    mkdir -p ${APPSCALE_HOME}/AppDB/cassandra
-    cd ${APPSCALE_HOME}/AppDB/cassandra
-    rm -rfv cassandra
-    curl ${CURL_OPTS} -o apache-cassandra-${CASSANDRA_VER}-bin.tar.gz $APPSCALE_PACKAGE_MIRROR/apache-cassandra-${CASSANDRA_VER}-bin.tar.gz
-    tar xzvf apache-cassandra-${CASSANDRA_VER}-bin.tar.gz
-    mv -v apache-cassandra-${CASSANDRA_VER} cassandra
-    rm -fv apache-cassandra-${CASSANDRA_VER}-bin.tar.gz
-    cd cassandra
-    chmod -v +x bin/cassandra
-    cp -v ${APPSCALE_HOME}/AppDB/cassandra/templates/cassandra.in.sh ${APPSCALE_HOME}/AppDB/cassandra/cassandra/bin
+    CASSANDRA_VER=2.2.7
+
+    CASSANDRA_PACKAGE="apache-cassandra-${CASSANDRA_VER}-bin.tar.gz"
+    CASSANDRA_PACKAGE_MD5="40f6e3851ec26467c33372a4fb1d9854"
+    cachepackage ${CASSANDRA_PACKAGE} ${CASSANDRA_PACKAGE_MD5}
+
+    # Remove old Cassandra environment directory.
+    rm -rf ${APPSCALE_HOME}/AppDB/cassandra
+
+    CASSANDRA_DIR="/opt/cassandra"
+    CASSANDRA_ENV="${APPSCALE_HOME}/AppDB/cassandra_env"
+    mkdir -p ${CASSANDRA_DIR}
+    rm -rf ${CASSANDRA_DIR}/cassandra
+    tar xzf "${PACKAGE_CACHE}/${CASSANDRA_PACKAGE}" -C ${CASSANDRA_DIR}
+    mv -v ${CASSANDRA_DIR}/apache-cassandra-${CASSANDRA_VER} ${CASSANDRA_DIR}/cassandra
+
+    chmod -v +x ${CASSANDRA_DIR}/cassandra/bin/cassandra
+    cp -v ${CASSANDRA_ENV}/templates/cassandra-env.sh\
+        ${CASSANDRA_DIR}/cassandra/conf
     mkdir -p /var/lib/cassandra
     # TODO only grant the cassandra user access.
     chmod 777 /var/lib/cassandra
 
-    if [ "$DIST" = "precise" ]; then
-        pipwrapper  thrift
-    fi
-    pipwrapper  pycassa
-
-    cd ${APPSCALE_HOME}/AppDB/cassandra/cassandra/lib
-    curl ${CURL_OPTS} -o jamm-0.2.2.jar $APPSCALE_PACKAGE_MIRROR/jamm-0.2.2.jar
+    pipwrapper cassandra-driver
 
     # Create separate log directory.
     mkdir -pv /var/log/appscale/cassandra
@@ -346,8 +352,8 @@ installcassandra()
 
 postinstallcassandra()
 {
-    mkdir -p ${APPSCALE_HOME}/.appscale/${APPSCALE_VERSION}
-    touch ${APPSCALE_HOME}/.appscale/${APPSCALE_VERSION}/cassandra
+    mkdir -p ${CONFIG_DIR}/${APPSCALE_VERSION}
+    touch ${CONFIG_DIR}/${APPSCALE_VERSION}/cassandra
 }
 
 
@@ -376,17 +382,7 @@ postinstallservice()
 installpythonmemcache()
 {
     if [ "$DIST" = "precise" ]; then
-        VERSION=1.53
-
-        mkdir -pv ${APPSCALE_HOME}/downloads
-        cd ${APPSCALE_HOME}/downloads
-        curl ${CURL_OPTS} -o python-memcached-${VERSION}.tar.gz $APPSCALE_PACKAGE_MIRROR/python-memcached-${VERSION}.tar.gz
-        tar zxvf python-memcached-${VERSION}.tar.gz
-        cd python-memcached-${VERSION}
-        python setup.py install
-        cd ..
-        rm -fr python-memcached-${VERSION}.tar.gz
-        rm -fr python-memcached-${VERSION}
+        pipwrapper "python-memcached==1.53"
     fi
 }
 
@@ -404,7 +400,7 @@ installzookeeper()
 
     # Trusty's kazoo version is too old, so use the version in Xenial.
     case "$DIST" in
-        precise|trusty) pipwrapper "kazoo==2.2.1" ;;
+        precise|trusty|wheezy) pipwrapper "kazoo==2.2.1" ;;
         *) apt-get install python-kazoo ;;
     esac
 }
@@ -457,16 +453,29 @@ installVersion()
 {
     # Install the VERSION file. We should sign it to ensure the version is
     # correct.
-    if [ -e /etc/appscale/VERSION ]; then
-        mv /etc/appscale/VERSION /etc/appscale/VERSION-$(date --rfc-3339=date)
+    if [ -e ${CONFIG_DIR}/VERSION ]; then
+        mv ${CONFIG_DIR}/VERSION ${CONFIG_DIR}/VERSION-$(date --rfc-3339=date)
     fi
-    cp ${APPSCALE_HOME}/VERSION /etc/appscale/
+    cp ${APPSCALE_HOME}/VERSION ${CONFIG_DIR}
 }
 
 installrequests()
 {
     if [ "$DIST" = "precise" ]; then
         pipwrapper requests
+    fi
+}
+
+# pyOpenSSL is required for client SNI support on Python < 2.7.9.
+installpyopenssl()
+{
+    if [ "$DIST" = "precise" ]; then
+        # A pyOpenSSL dependency (cryptography) requires distribute. After that
+        # is upgraded, setuptools and pkg_resources need to be reinstalled.
+        pipwrapper distribute
+        apt-get install --reinstall python-setuptools
+        apt-get install --reinstall python-pkg-resources
+        pipwrapper pyopenssl
     fi
 }
 
@@ -509,4 +518,37 @@ EOF
     # monit as soon as it starts.
     service monit stop
     disableservice monit
+}
+
+installpsutil()
+{
+    case ${DIST} in
+        precise|wheezy) pipwrapper psutil ;;
+    esac
+}
+
+installapiclient()
+{
+    # The InfrastructureManager requires the Google API client.
+    pipwrapper google-api-python-client
+}
+
+buildgo()
+{
+    GOROOT_DIR=${APPSCALE_HOME_RUNTIME}/AppServer/goroot
+    export GOROOT=${GOROOT_DIR}
+    GO_VERSION=`cat ${GOROOT_DIR}/VERSION`
+    echo "Building ${GO_VERSION} ..."
+    (cd ${GOROOT_DIR}/src && ./make.bash)
+}
+
+installtaskqueue()
+{
+    (cd ${APPSCALE_HOME}/AppTaskQueue && python setup.py install)
+}
+
+prepdashboard()
+{
+    rm -rf ${APPSCALE_HOME}/AppDashboard/vendor
+    pip install -t ${APPSCALE_HOME}/AppDashboard/vendor SOAPpy
 }
