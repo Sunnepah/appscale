@@ -10,6 +10,7 @@ import re
 import tempfile
 import time
 import urllib
+import urllib2
 
 
 from google.appengine.api import SOAPpy
@@ -561,6 +562,10 @@ class AppDashboardHelper(object):
       if result != 'true':
         raise AppHelperException(result)
 
+      if not self.pds_create_user(email, encrypted_pass):
+        uaserver.delete_user(email, GLOBAL_SECRET_KEY)
+        raise AppHelperException("Pds Error!")
+
       # Next, create the XMPP account. if the user's e-mail is a@a.a, then that
       # means their XMPP account name is a@login_ip.
       username_regex = re.compile(self.USERNAME_FROM_EMAIL_REGEX)
@@ -584,6 +589,16 @@ class AppDashboardHelper(object):
       logging.exception(err)
       raise AppHelperException(str(err))
     return True
+
+  def pds_create_user(self, email, encrypted_pass):
+    data = {'email': email, 'password': encrypted_pass}
+
+    req = urllib2.Request("http://localhost:8080/api/v1/user/new/", json.dumps(data))
+    response = urllib2.urlopen(req)
+    if response.getcode() == 200:
+      return True
+    else:
+      return False
 
   def get_user_app_list(self, email):
     """ Queries the UserAppServer to retrieve a list of apps that the
