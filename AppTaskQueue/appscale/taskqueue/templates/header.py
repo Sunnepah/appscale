@@ -8,6 +8,7 @@
 """
 import datetime
 import httplib
+import logging
 import os
 import sys
 import yaml
@@ -18,16 +19,16 @@ def setup_environment():
   env = yaml.load(FILE.read())
   APPSCALE_HOME = env["APPSCALE_HOME"]
   sys.path.append(APPSCALE_HOME + "/AppServer")
-  sys.path.append(APPSCALE_HOME + "/lib")
 
 setup_environment()
 from celery import Celery
 from celery.utils.log import get_task_logger
+from httplib import BadStatusLine
+from socket import error as SocketError
 from urlparse import urlparse
 
-import appscale_info
-import constants
-
+from appscale.common import appscale_info
+from appscale.common import constants
 from appscale.taskqueue.brokers import rabbitmq
 from appscale.taskqueue.distributed_tq import TaskName
 from appscale.taskqueue.tq_config import TaskQueueConfig
@@ -52,9 +53,10 @@ celery = Celery(module_name, broker=rabbitmq.get_connection_string(),
 celery.config_from_object('CELERY_CONFIGURATION')
 
 logger = get_task_logger(__name__)
+logger.setLevel(logging.INFO)
 
-master_db_ip = appscale_info.get_db_master_ip()
-connection_str = master_db_ip + ":" + str(constants.DB_SERVER_PORT)
+db_proxy = appscale_info.get_db_proxy()
+connection_str = '{}:{}'.format(db_proxy, str(constants.DB_SERVER_PORT))
 ds_distrib = datastore_distributed.DatastoreDistributed(
   "appscaledashboard", connection_str, require_indexes=False)
 apiproxy_stub_map.apiproxy.RegisterStub('datastore_v3', ds_distrib)

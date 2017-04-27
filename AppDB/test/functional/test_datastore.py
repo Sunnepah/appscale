@@ -3,17 +3,22 @@
 #
 # NOMURA Yoshihide <nomura@pobox.com>
 
-import sys
-import time
-import unittest
 import base64
-from threading import Thread
-from test import test_support
-import appscale_datastore
-import helper_functions as hf
-from dbconstants import *
+import os
+import sys
+import unittest
 
-USERS_VALUES = ["suwanny@gmail.com", "11", "2009", "2009", "2009", 
+from appscale.common.constants import APPSCALE_HOME
+from appscale.datastore import appscale_datastore
+from appscale.datastore import helper_functions as hf
+from appscale.datastore.dbconstants import APPS_SCHEMA
+from appscale.datastore.dbconstants import APPS_TABLE
+from appscale.datastore.dbconstants import USERS_SCHEMA
+from appscale.datastore.dbconstants import USERS_TABLE
+from test import test_support
+from threading import Thread
+
+USERS_VALUES = ["suwanny@gmail.com", "11", "2009", "2009", "2009",
     "bbs", "xxx", "xxx", "1", "yyy", 
     "0.0.0.0", "2009", "zzz", "yes"]
 

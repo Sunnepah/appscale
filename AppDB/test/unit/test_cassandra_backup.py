@@ -1,25 +1,20 @@
 #!/usr/bin/env python
 
-import os
 import re
 import sys
 import subprocess
 import unittest
 from flexmock import flexmock
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
-from backup import backup_exceptions
-from backup import cassandra_backup
+from appscale.common import appscale_info
+from appscale.common.unpackaged import INFRASTRUCTURE_MANAGER_DIR
+from appscale.datastore.backup import backup_exceptions
+from appscale.datastore.backup import cassandra_backup
+from appscale.datastore.cassandra_env.cassandra_interface import NODE_TOOL
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../lib'))
-import appscale_info
-
-sys.path.append(
-  os.path.join(os.path.dirname(__file__), '../../../InfrastructureManager'))
+sys.path.append(INFRASTRUCTURE_MANAGER_DIR)
 from utils import utils
 
-from cassandra_env import shut_down_cassandra
-from cassandra_env.cassandra_interface import NODE_TOOL
 
 class TestCassandraBackup(unittest.TestCase):
   """ A set of test cases for the Cassandra backup. """
@@ -39,10 +34,6 @@ class TestCassandraBackup(unittest.TestCase):
 
   def test_restore_snapshots(self):
     pass
-
-  def test_shutdown_datastore(self):
-    flexmock(shut_down_cassandra).should_receive('run').times(1)
-    cassandra_backup.shutdown_datastore()
 
   def test_backup_data(self):
     db_ips = ['192.168.33.10', '192.168.33.11']
@@ -92,7 +83,10 @@ class TestCassandraBackup(unittest.TestCase):
     flexmock(utils).should_receive('ssh').with_args(re.compile('^192.*'),
       keyname, 'monit summary', method=subprocess.check_output).\
       and_return('summary output')
-    flexmock(utils).should_receive('monit_status').and_return('Not monitored')
+    status_outputs = (['Not monitored'] * len(db_ips)) +\
+                     (['Running'] * len(db_ips))
+    flexmock(utils).should_receive('monit_status').and_return(*status_outputs)\
+      .one_by_one()
 
     flexmock(utils).should_receive('ssh').with_args(re.compile('^192.*'),
       keyname, re.compile('^find.* -exec rm .*'))
@@ -100,8 +94,11 @@ class TestCassandraBackup(unittest.TestCase):
       keyname, re.compile('^tar xf .*'))
     flexmock(utils).should_receive('ssh').with_args(re.compile('^192.*'),
       keyname, re.compile('^monit start .*'))
+    flexmock(utils).should_receive('ssh').with_args(
+      re.compile('^192.*'), keyname, re.compile('^chown -R cassandra /opt/.*'))
 
     cassandra_backup.restore_data(path, keyname)
+
 
 if __name__ == "__main__":
   unittest.main()    

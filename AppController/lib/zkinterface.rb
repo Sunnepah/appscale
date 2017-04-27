@@ -109,10 +109,7 @@ class ZKInterface
     @@client_ip = client_ip
     @@ip = ip
 
-    if !defined?(@@lock)
-      @@lock = Monitor.new
-    end
-
+    @@lock = Monitor.new unless defined?(@@lock)
     @@lock.synchronize {
       if defined?(@@zk)
         Djinn.log_debug("Closing old connection to zookeeper.")
@@ -206,42 +203,6 @@ class ZKInterface
   end
 
 
-  # Contacts ZooKeeper to get the information about App Engine apps hosted
-  # on the named machine.
-  #
-  # Args:
-  #   public_ip: A String that names the public IP or FQDN where the machine
-  #     we should acquire AppServer info for runs.
-  #
-  # Returns:
-  #   A Hash mapping Strings to Hashes. Here, each String is an appid of an
-  #   app that should be running on this machine, and the Hash it maps to
-  #   contains keys for the nginx, haproxy, and dev_appserver ports the app
-  #   is supposed to be running on.
-  def self.get_appserver_state(public_ip)
-    return JSON.load(self.get("#{APPSERVER_STATE_PATH}/#{public_ip}"))
-  end
-
-
-  # Writes the given AppServer state to ZooKeeper, on behalf of the named
-  # machine.
-  #
-  # It also creates any higher-level directories in ZooKeeper that may be
-  # needed to save this info.
-  #
-  # Args:
-  #   public_ip: A String that names the public IP or FQDN where the machine
-  #     we should save AppServer info for runs.
-  #   state: A Hash that maps each appid running on this machine to a Hash
-  #     indicating what ports the app binds to on that machine.
-  def self.write_appserver_state(public_ip, state)
-    self.set(APPCONTROLLER_PATH, DUMMY_DATA, NOT_EPHEMERAL)
-    self.set(APPSERVER_STATE_PATH, DUMMY_DATA, NOT_EPHEMERAL)
-    self.set("#{APPSERVER_STATE_PATH}/#{public_ip}", JSON.dump(state),
-      NOT_EPHEMERAL)
-  end
-
-
   # Gets a lock that AppControllers can use to have exclusive write access
   # (between other AppControllers) to the ZooKeeper hierarchy located at
   # APPCONTROLLER_PATH. It returns a boolean that indicates whether or not
@@ -252,8 +213,8 @@ class ZKInterface
     end
 
     info = self.run_zookeeper_operation {
-      @@zk.create(:path => APPCONTROLLER_LOCK_PATH, 
-        :ephemeral => EPHEMERAL, :data => JSON.dump(@@client_ip))
+      @@zk.create(:path => APPCONTROLLER_LOCK_PATH,  :ephemeral => EPHEMERAL,
+                  :data => @@client_ip)
     }
     if info[:rc].zero? 
       return true
@@ -428,7 +389,7 @@ class ZKInterface
     end
 
     # Create the folder for this node.
-    my_ip_path = "#{APPCONTROLLER_NODE_PATH}/#{node.public_ip}"
+    my_ip_path = "#{APPCONTROLLER_NODE_PATH}/#{node.private_ip}"
     self.run_zookeeper_operation {
       @@zk.create(:path => my_ip_path, :ephemeral => NOT_EPHEMERAL, 
         :data => DUMMY_DATA)
@@ -436,16 +397,16 @@ class ZKInterface
 
     # Create an ephemeral link associated with this node, which other
     # AppControllers can use to quickly detect dead nodes.
-    self.set_live_node_ephemeral_link(node.public_ip)
+    self.set_live_node_ephemeral_link(node.private_ip)
 
 
     # Since we're reporting on the roles we've started, we are done loading
     # roles right now, so write that information for others to read and act on.
-    self.set_done_loading(node.public_ip, done_loading)
+    self.set_done_loading(node.private_ip, done_loading)
 
     # Finally, dump the data from this node to ZK, so that other nodes can
     # reconstruct it as needed.
-    self.set_job_data_for_ip(node.public_ip, node.to_hash())
+    self.set_job_data_for_ip(node.private_ip, node.to_hash())
 
     return
   end
@@ -470,8 +431,8 @@ class ZKInterface
     end
 
     begin
-      json_contents = self.get(loading_file)
-      return JSON.load(json_contents)
+      contents = self.get(loading_file)
+      return contents == "true"
     rescue FailedZooKeeperOperationException
       return false
     end
@@ -493,8 +454,9 @@ class ZKInterface
   # node is done loading (if they have finished starting/stopping roles), or is
   # not done loading (if they have roles they need to start or stop).
   def self.set_done_loading(ip, val)
-    return self.set("#{APPCONTROLLER_NODE_PATH}/#{ip}/done_loading", 
-      JSON.dump(val), NOT_EPHEMERAL)
+    zk_value = val ? "true" : "false"
+    return self.set("#{APPCONTROLLER_NODE_PATH}/#{ip}/done_loading",
+                    zk_value, NOT_EPHEMERAL)
   end
 
 
@@ -513,121 +475,6 @@ class ZKInterface
   def self.set_job_data_for_ip(ip, job_data)
     return self.set("#{APPCONTROLLER_NODE_PATH}/#{ip}/job_data", 
       JSON.dump(job_data), NOT_EPHEMERAL)
-  end
-
-
-  # Adds the specified role to the given node in ZooKeeper. A node can call this
-  # function to add a role to another node, and the other node should take on
-  # this role, or a node can call this function to let others know that it is
-  # taking on a new role.
-  # Callers should acquire the ZK Lock before calling this function.
-  # roles should be an Array of Strings, where each String is a role to add
-  # node should be a DjinnJobData representing the node that we want to add
-  # the roles to
-  def self.add_roles_to_node(roles, node, keyname)
-    old_job_data = self.get_job_data_for_ip(node.public_ip)
-    new_node = DjinnJobData.new(old_job_data, keyname)
-    new_node.add_roles(roles.join(":"))
-    self.set_job_data_for_ip(node.public_ip, new_node.to_hash())
-    self.set_done_loading(node.public_ip, false)
-    self.update_ips_timestamp()
-  end
-
-
-  # Removes the specified roles from the given node in ZooKeeper. A node can 
-  # call this function to remove roles from another node, and the other node 
-  # should take on this role, or a node can call this function to let others 
-  # know that it is stopping existing roles.
-  # Callers should acquire the ZK Lock before calling this function.
-  # roles should be an Array of Strings, where each String is a role to remove
-  # node should be a DjinnJobData representing the node that we want to remove
-  # the roles from
-  def self.remove_roles_from_node(roles, node, keyname)
-    old_job_data = self.get_job_data_for_ip(node.public_ip)
-    new_node = DjinnJobData.new(old_job_data, keyname)
-    new_node.remove_roles(roles.join(":"))
-    self.set_job_data_for_ip(node.public_ip, new_node.to_hash())
-    self.set_done_loading(node.public_ip, false)
-    self.update_ips_timestamp()
-  end
-
-
-  # Asks ZooKeeper for all of the scaling requests (e.g., scale up or scale
-  # down) for the given application.
-  #
-  # Args:
-  #   appid: A String that names the application whose scaling requests we
-  #     wish to query.
-  # Returns:
-  #   An Array of Strings, where each String is a request to either add or
-  #   remove AppServers for this application. If no requests have been made
-  #   for this application, an empty Array is returned.
-  def self.get_scaling_requests_for_app(appid)
-    path = "#{SCALING_DECISION_PATH}/#{appid}"
-    requestors = self.get_children(path)
-    scaling_requests = []
-    requestors.each { |ip|
-      scaling_requests << self.get("#{path}/#{ip}")
-    }
-    return scaling_requests
-  end
-
-
-  # Erases all requests to scale AppServers up or down for the named
-  # application.
-  #
-  # Args:
-  #   appid: A String that names the application whose scaling requests we
-  #     wish to erase.
-  def self.clear_scaling_requests_for_app(appid)
-    path = "#{SCALING_DECISION_PATH}/#{appid}"
-    requests = self.get_children(path)
-    requests.each { |request|
-      self.delete("#{path}/#{request}")
-    }
-  end
-
-
-  # Writes a node in ZooKeeper indicating that the named application needs
-  # additional AppServers running to serve the amount of traffic currently
-  # accessing the caller's machine.
-  #
-  # Args:
-  #   appid: A String that names the application that should be scaled up.
-  #   ip: A String that names the IP address of the machine that is requesting
-  #     more AppServers for this application.
-  # Returns:
-  #   true if the request was successfully made, and false otherwise.
-  def self.request_scale_up_for_app(appid, ip)
-    return self.request_scaling_for_app(appid, ip, :scale_up)
-  end
-
-
-  # Writes a node in ZooKeeper indicating that the named application needs
-  # less AppServers running to serve the amount of traffic currently
-  # accessing the caller's machine.
-  #
-  # Args:
-  #   appid: A String that names the application that should be scaled down.
-  #   ip: A String that names the IP address of the machine that is requesting
-  #     less AppServers for this application.
-  # Returns:
-  #   true if the request was successfully made, and false otherwise.
-  def self.request_scale_down_for_app(appid, ip)
-    return self.request_scaling_for_app(appid, ip, :scale_down)
-  end
-
-
-  def self.request_scaling_for_app(appid, ip, decision)
-    begin
-      path = "#{SCALING_DECISION_PATH}/#{appid}/#{ip}"
-      self.set(SCALING_DECISION_PATH, DUMMY_DATA, NOT_EPHEMERAL)
-      self.set("#{SCALING_DECISION_PATH}/#{appid}", DUMMY_DATA, NOT_EPHEMERAL)
-      self.set(path, decision.to_s, NOT_EPHEMERAL)
-      return true
-    rescue FailedZooKeeperOperationException
-      return false
-    end
   end
 
 
@@ -699,6 +546,21 @@ class ZKInterface
       return []
     else
       return children
+    end
+  end
+
+
+  # Recursively create a path if it doesn't exist.
+  def self.ensure_path(path)
+    # Remove preceding slash.
+    nodes = path.split('/')[1..-1]
+    i = 0
+    while i < nodes.length
+      node = '/' + nodes[0..i].join('/')
+      self.run_zookeeper_operation {
+        @@zk.create(:path => node)
+      }
+      i += 1
     end
   end
 

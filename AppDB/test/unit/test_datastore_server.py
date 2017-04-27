@@ -1,34 +1,44 @@
 #!/usr/bin/env python
 # Programmer: Navraj Chohan <nlake44@gmail.com>
 
-import os
+import datetime
 import sys
 import unittest
 
+from appscale.common import appscale_info
+from appscale.common.unpackaged import APPSCALE_PYTHON_APPSERVER
+from appscale.datastore import dbconstants
+from appscale.datastore import utils
+from appscale.datastore.datastore_distributed import DatastoreDistributed
+from appscale.datastore.dbconstants import APP_ENTITY_SCHEMA
+from appscale.datastore.dbconstants import JOURNAL_SCHEMA
+from appscale.datastore.dbconstants import TOMBSTONE
+
+from appscale.datastore.cassandra_env.cassandra_interface import (
+  DatastoreProxy,
+  deletions_for_entity,
+  index_deletions,
+  mutations_for_entity
+)
+
+from appscale.datastore.utils import (
+  get_entity_key,
+  get_entity_kind,
+  get_index_key_from_params,
+  get_index_kv_from_tuple,
+  get_kind_key
+)
+
+from appscale.datastore.zkappscale.entity_lock import EntityLock
+from appscale.datastore.zkappscale.zktransaction import ZKTransactionException
 from cassandra.cluster import Cluster
 from flexmock import flexmock
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../../AppServer"))  
+sys.path.append(APPSCALE_PYTHON_APPSERVER)
 from google.appengine.api import api_base_pb
 from google.appengine.datastore import entity_pb
 from google.appengine.datastore import datastore_pb
 from google.appengine.ext import db
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
-import appscale_info
-import dbconstants
-
-from cassandra_env.cassandra_interface import DatastoreProxy
-from cassandra_env.cassandra_interface import deletions_for_entity
-from cassandra_env.cassandra_interface import index_deletions
-from cassandra_env.cassandra_interface import mutations_for_entity
-from datastore_server import DatastoreDistributed
-from datastore_server import ID_KEY_LENGTH
-from datastore_server import TOMBSTONE
-from dbconstants import APP_ENTITY_SCHEMA
-from dbconstants import JOURNAL_SCHEMA
-from zkappscale.zktransaction import TX_TIMEOUT
-from zkappscale.zktransaction import ZKTransactionException
 
 
 class Item(db.Model):
@@ -42,11 +52,15 @@ class TestDatastoreServer(unittest.TestCase):
   BASIC_ENTITY = ['guestbook', 'Greeting', 'foo', 'content', 'hello world']
 
   def get_zookeeper(self):
-    zookeeper = flexmock()
+    zk_handle = flexmock(handler=flexmock(event_object=lambda: None,
+                                          sleep_func=lambda: None,
+                                          lock_object=lambda: None))
+    zookeeper = flexmock(handle=zk_handle)
     zookeeper.should_receive("acquire_lock").and_return(True)
     zookeeper.should_receive("release_lock").and_return(True)
     zookeeper.should_receive("get_transaction_id").and_return(1)
     zookeeper.should_receive("increment_and_get_counter").and_return(0,1000)
+    zookeeper.should_receive('remove_tx_node')
     return zookeeper
 
   def test_get_entity_kind(self):
@@ -55,7 +69,7 @@ class TestDatastoreServer(unittest.TestCase):
     dd = DatastoreDistributed(db_batch, None)
     item = Item(name="Bob", _app="hello")
     key = db.model_to_protobuf(item)
-    self.assertEquals(dd.get_entity_kind(key), "Item")
+    self.assertEquals(get_entity_kind(key), "Item")
 
   def test_kind_key(self):
     db_batch = flexmock()
@@ -63,15 +77,15 @@ class TestDatastoreServer(unittest.TestCase):
     dd = DatastoreDistributed(db_batch, None)
     item = Item(name="Dyan", _app="hello")
     key = db.model_to_protobuf(item)
-    self.assertEquals(dd.get_kind_key("howdy", key.key().path()), "howdy\x00Item\x01Item:0000000000\x01")
+    self.assertEquals(get_kind_key("howdy", key.key().path()), "howdy\x00Item\x01Item:0000000000\x01")
 
     item1 = Item(key_name="Bob", name="Bob", _app="hello")
     key = db.model_to_protobuf(item1)
-    self.assertEquals(dd.get_kind_key("howdy", key.key().path()), "howdy\x00Item\x01Item:Bob\x01")
+    self.assertEquals(get_kind_key("howdy", key.key().path()), "howdy\x00Item\x01Item:Bob\x01")
    
     item2 = Item(key_name="Frank", name="Frank", _app="hello", parent = item1)
     key = db.model_to_protobuf(item2)
-    self.assertEquals(dd.get_kind_key("howdy", key.key().path()),
+    self.assertEquals(get_kind_key("howdy", key.key().path()),
            "howdy\x00Item\x01Item:Bob\x01Item:Frank\x01")
 
   def test_get_entity_key(self):
@@ -80,7 +94,7 @@ class TestDatastoreServer(unittest.TestCase):
     dd = DatastoreDistributed(db_batch, None)
     item = Item(key_name="Bob", name="Bob", _app="hello")
     key = db.model_to_protobuf(item)
-    self.assertEquals(str(dd.get_entity_key("howdy", key.key().path())), "howdy\x00Item:Bob\x01")
+    self.assertEquals(str(get_entity_key("howdy", key.key().path())), "howdy\x00Item:Bob\x01")
 
   def test_validate_key(self):
     db_batch = flexmock()
@@ -107,7 +121,8 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch.should_receive('valid_data_version').and_return(True)
     dd = DatastoreDistributed(db_batch, None)
     params = ['a','b','c','d','e']
-    self.assertEquals(dd.get_index_key_from_params(params), "a\x00b\x00c\x00d\x00e")
+    self.assertEquals(get_index_key_from_params(params),
+                      "a\x00b\x00c\x00d\x00e")
 
   def test_get_index_kv_from_tuple(self):
     db_batch = flexmock()
@@ -118,7 +133,7 @@ class TestDatastoreServer(unittest.TestCase):
     key1 = db.model_to_protobuf(item1)
     key2 = db.model_to_protobuf(item2)
     tuples_list = [("a\x00b",key1),("a\x00b",key2)]
-    self.assertEquals(dd.get_index_kv_from_tuple(
+    self.assertEquals(get_index_kv_from_tuple(
       tuples_list), (['a\x00b\x00Item\x00name\x00\x9aBob\x01\x01\x00Item:Bob\x01', 
       'a\x00b\x00Item:Bob\x01'], 
       ['a\x00b\x00Item\x00name\x00\x9aSally\x01\x01\x00Item:Sally\x01', 
@@ -261,7 +276,7 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch = flexmock()
     db_batch.should_receive('valid_data_version').and_return(True)
     zookeeper = flexmock()
-    zookeeper.should_receive("release_lock").and_return(True)
+    zookeeper.should_receive('remove_tx_node')
     dd = DatastoreDistributed(db_batch, zookeeper)
     flexmock(dd).should_receive('apply_txn_changes')
     commit_request = datastore_pb.Transaction()
@@ -315,11 +330,6 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch = flexmock()
     db_batch.should_receive('valid_data_version').and_return(True)
 
-    zookeeper = flexmock()
-    zookeeper.should_receive("acquire_lock").and_return(True)
-    zookeeper.should_receive("release_lock").and_return(True)
-    zookeeper.should_receive("get_transaction_id").and_return(1)
-
     entity_proto1 = self.get_new_entity_proto("test", "test_kind", "bob", "prop1name",
                                               "prop1val", ns="blah")
     entity_key1 = 'test\x00blah\x00test_kind:bob\x01'
@@ -330,7 +340,7 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch.should_receive('batch_get_entity').and_return(
       {entity_key1: {}, entity_key2: {}})
     db_batch.should_receive('batch_mutate')
-    dd = DatastoreDistributed(db_batch, zookeeper)
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
     putreq_pb = datastore_pb.PutRequest()
     putreq_pb.add_entity()
     putreq_pb.mutable_entity(0).MergeFrom(entity_proto1)
@@ -338,6 +348,11 @@ class TestDatastoreServer(unittest.TestCase):
     putreq_pb.mutable_entity(1).MergeFrom(entity_proto2)
     
     putresp_pb = datastore_pb.PutResponse()
+
+    entity_lock = flexmock(EntityLock)
+    entity_lock.should_receive('acquire')
+    entity_lock.should_receive('release')
+
     dd.dynamic_put('test', putreq_pb, putresp_pb)
     self.assertEquals(len(putresp_pb.key_list()), 2)
 
@@ -345,9 +360,6 @@ class TestDatastoreServer(unittest.TestCase):
     app_id = 'test'
     db_batch = flexmock()
     db_batch.should_receive('valid_data_version').and_return(True)
-
-    zookeeper = flexmock()
-    zookeeper.should_receive("acquire_lock").and_return(True)
 
     entity_proto1 = self.get_new_entity_proto(
       app_id, "test_kind", "bob", "prop1name", "prop1val", ns="blah")
@@ -360,11 +372,13 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch.should_receive('batch_get_entity').and_return(
       {entity_key1: {}, entity_key2: {}})
     db_batch.should_receive('batch_mutate')
-    dd = DatastoreDistributed(db_batch, zookeeper)
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
 
-    # Make sure it does not throw an exception
-    txn_hash = {entity_key1: 1, entity_key2: 1}
-    dd.put_entities(app_id, entity_list, txn_hash)
+    entity_lock = flexmock(EntityLock)
+    entity_lock.should_receive('acquire')
+    entity_lock.should_receive('release')
+
+    dd.put_entities(app_id, entity_list)
 
   def test_acquire_locks_for_trans(self):
     db_batch = flexmock()
@@ -445,13 +459,13 @@ class TestDatastoreServer(unittest.TestCase):
     db_batch.should_receive('valid_data_version').and_return(True)
     db_batch.should_receive("batch_get_entity").and_return(row_values)
     db_batch.should_receive('batch_mutate')
+    db_batch.should_receive('_normal_batch')
 
     dd = DatastoreDistributed(db_batch, zookeeper) 
 
     row_keys = [entity_proto1.key()]
 
-    txn_hash = {row_key: 1}
-    dd.delete_entities(app_id, row_keys, txn_hash)
+    dd.delete_entities(entity_proto1.key(), 1, row_keys)
      
   def test_release_put_locks_for_nontrans(self):
     zookeeper = flexmock()
@@ -504,6 +518,7 @@ class TestDatastoreServer(unittest.TestCase):
                    APP_ENTITY_SCHEMA[1]: 1
                  }
                })
+    db_batch.should_receive('record_reads')
 
     dd = DatastoreDistributed(db_batch, zookeeper) 
 
@@ -536,6 +551,7 @@ class TestDatastoreServer(unittest.TestCase):
     filter_info = []
     tombstone1 = {'key': {APP_ENTITY_SCHEMA[0]:TOMBSTONE, APP_ENTITY_SCHEMA[1]: 1}}
     db_batch = flexmock()
+    db_batch.should_receive('record_reads')
     db_batch.should_receive('valid_data_version').and_return(True)
     db_batch.should_receive("batch_get_entity").and_return(
                {"test\x00blah\x00test_kind:nancy\x01": 
@@ -582,6 +598,7 @@ class TestDatastoreServer(unittest.TestCase):
                    APP_ENTITY_SCHEMA[1]: 1
                  }
                })
+    db_batch.should_receive('record_reads')
 
     db_batch.should_receive("batch_put_entity").and_return(None)
     entity_proto1 = {'test\x00blah\x00test_kind:nancy\x01':{APP_ENTITY_SCHEMA[0]:entity_proto1.Encode(),
@@ -636,45 +653,45 @@ class TestDatastoreServer(unittest.TestCase):
     dd.kindless_query(query, filter_info)
 
   def test_dynamic_delete(self):
+    entity_lock = flexmock(EntityLock)
+    entity_lock.should_receive('acquire')
+    entity_lock.should_receive('release')
+
     del_request = flexmock()
     del_request.should_receive("key_list")
     del_request.should_receive("has_transaction").never()
     del_request.should_receive("transaction").never()
     db_batch = flexmock()
     db_batch.should_receive('valid_data_version').and_return(True)
-    dd = DatastoreDistributed(db_batch, None)
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
     dd.dynamic_delete("appid", del_request)
 
-    fake_element = flexmock()
-    fake_element.should_receive("type").and_return("kind")
-    fake_path = flexmock()
-    fake_path.should_receive("element_list").and_return([fake_element])
-    fake_key = flexmock()
-    fake_key.should_receive("path").and_return(fake_path)
+    fake_key = entity_pb.Reference()
+    fake_key.set_app('foo')
+    path = fake_key.mutable_path()
+    element = path.add_element()
+    element.set_type('bar')
+    element.set_id(1)
+
 
     del_request = flexmock()
     del_request.should_receive("key_list").and_return([fake_key])
-    del_request.should_receive("has_transaction").and_return(True).twice()
+    del_request.should_receive("has_transaction").and_return(True)
     transaction = flexmock()
     transaction.should_receive("handle").and_return(1)
-    del_request.should_receive("transaction").and_return(transaction).once()
+    del_request.should_receive("transaction").and_return(transaction)
     del_request.should_receive("has_mark_changes").and_return(False)
-    dd = DatastoreDistributed(db_batch, None)
-    flexmock(dd).should_receive("acquire_locks_for_trans").and_return({})
-    flexmock(dd).should_receive("release_locks_for_nontrans").never()
-    flexmock(dd).should_receive("get_entity_kind").and_return("kind")
-    flexmock(dd).should_receive('delete_entities_txn')
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
+    flexmock(utils).should_receive("get_entity_kind").and_return("kind")
+    db_batch.should_receive('delete_entities_tx')
     dd.dynamic_delete("appid", del_request)
 
     del_request = flexmock()
     del_request.should_receive("key_list").and_return([fake_key])
-    del_request.should_receive("has_transaction").and_return(False).twice()
+    del_request.should_receive("has_transaction").and_return(False)
     del_request.should_receive("has_mark_changes").and_return(False)
-    dd = DatastoreDistributed(db_batch, None)
-    flexmock(dd).should_receive("acquire_locks_for_trans").never()
-    flexmock(dd).should_receive("acquire_locks_for_nontrans").once().and_return({})
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
     flexmock(dd).should_receive("delete_entities").once()
-    flexmock(dd).should_receive("release_locks_for_nontrans").once()
     dd.dynamic_delete("appid", del_request)
 
   def test_reverse_path(self):
@@ -888,9 +905,9 @@ class TestDatastoreServer(unittest.TestCase):
     mutations = mutations_for_entity(entity, txn, new_entity)
     self.assertEqual(len(mutations), 6)
     self.assertEqual(mutations[0]['table'], dbconstants.ASC_PROPERTY_TABLE)
-    self.assertEqual(mutations[0]['operation'], dbconstants.TxnActions.DELETE)
+    self.assertEqual(mutations[0]['operation'], dbconstants.Operations.DELETE)
     self.assertEqual(mutations[1]['table'], dbconstants.DSC_PROPERTY_TABLE)
-    self.assertEqual(mutations[1]['operation'], dbconstants.TxnActions.DELETE)
+    self.assertEqual(mutations[1]['operation'], dbconstants.Operations.DELETE)
     self.assertEqual(mutations[2]['table'], dbconstants.APP_ENTITY_TABLE)
     self.assertEqual(mutations[3]['table'], dbconstants.APP_KIND_TABLE)
     self.assertEqual(mutations[4]['table'], dbconstants.ASC_PROPERTY_TABLE)
@@ -926,11 +943,11 @@ class TestDatastoreServer(unittest.TestCase):
                                      (composite_index,))
     self.assertEqual(len(mutations), 10)
     self.assertEqual(mutations[0]['table'], dbconstants.ASC_PROPERTY_TABLE)
-    self.assertEqual(mutations[0]['operation'], dbconstants.TxnActions.DELETE)
+    self.assertEqual(mutations[0]['operation'], dbconstants.Operations.DELETE)
     self.assertEqual(mutations[1]['table'], dbconstants.DSC_PROPERTY_TABLE)
-    self.assertEqual(mutations[1]['operation'], dbconstants.TxnActions.DELETE)
+    self.assertEqual(mutations[1]['operation'], dbconstants.Operations.DELETE)
     self.assertEqual(mutations[2]['table'], dbconstants.COMPOSITE_TABLE)
-    self.assertEqual(mutations[2]['operation'], dbconstants.TxnActions.DELETE)
+    self.assertEqual(mutations[2]['operation'], dbconstants.Operations.DELETE)
     self.assertEqual(mutations[3]['table'], dbconstants.APP_ENTITY_TABLE)
     self.assertEqual(mutations[4]['table'], dbconstants.APP_KIND_TABLE)
     self.assertEqual(mutations[5]['table'], dbconstants.ASC_PROPERTY_TABLE)
@@ -945,89 +962,30 @@ class TestDatastoreServer(unittest.TestCase):
     entity = self.get_new_entity_proto(app, *self.BASIC_ENTITY[1:])
 
     db_batch = flexmock()
+    db_batch.should_receive('get_transaction_metadata').and_return({
+      'puts': {entity.key().Encode(): entity.Encode()},
+      'deletes': [],
+      'tasks': [],
+      'reads': set(),
+      'start': datetime.datetime.utcnow(),
+      'is_xg': False,
+    })
     db_batch.should_receive('valid_data_version').and_return(True)
-    db_batch.should_receive('range_query').and_return([{
-      'txn_entity_1': {'operation': dbconstants.TxnActions.PUT,
-                       'operand': entity.Encode()}
-    }])
+    db_batch.should_receive('group_updates').and_return([])
 
     db_batch.should_receive('get_indices').and_return([])
 
-    dd = DatastoreDistributed(db_batch, None)
+    dd = DatastoreDistributed(db_batch, self.get_zookeeper())
     prefix = dd.get_table_prefix(entity)
-    entity_key = dd.get_entity_key(prefix, entity.key().path())
+    entity_key = get_entity_key(prefix, entity.key().path())
     db_batch.should_receive('batch_get_entity').and_return({entity_key: {}})
     db_batch.should_receive('batch_mutate')
 
+    entity_lock = flexmock(EntityLock)
+    entity_lock.should_receive('acquire')
+    entity_lock.should_receive('release')
+
     dd.apply_txn_changes(app, txn)
-
-  def test_delete_entities_txn(self):
-    app = 'guestbook'
-    txn_hash = {'root_key': 1}
-    txn_str = '1'.zfill(ID_KEY_LENGTH)
-    entity = self.get_new_entity_proto(app, *self.BASIC_ENTITY[1:])
-
-    db_batch = flexmock()
-    db_batch.should_receive('valid_data_version').and_return(True)
-    dd = DatastoreDistributed(db_batch, None)
-
-    keys = [entity.key()]
-    prefix = dd.get_table_prefix(entity.key())
-    entity_key = dd.get_entity_key(prefix, entity.key().path())
-    encoded_path = str(
-      dd.encode_index_pb(entity.key().path()))
-    txn_keys = [dd._SEPARATOR.join([app, txn_str, '', encoded_path])]
-    txn_values = {
-      txn_keys[0]: {
-        dbconstants.TRANSACTIONS_SCHEMA[0]: dbconstants.TxnActions.DELETE,
-        dbconstants.TRANSACTIONS_SCHEMA[1]: entity_key,
-        dbconstants.TRANSACTIONS_SCHEMA[2]: ''
-      }
-    }
-
-    flexmock(dd).should_receive('get_root_key').and_return('root_key')
-
-    db_batch.should_receive('batch_put_entity').with_args(
-      dbconstants.TRANSACTIONS_TABLE,
-      txn_keys,
-      dbconstants.TRANSACTIONS_SCHEMA,
-      txn_values,
-      ttl=TX_TIMEOUT * 2
-    )
-    dd.delete_entities_txn(app, keys, txn_hash)
-
-  def test_put_entities_txn(self):
-    app = 'guestbook'
-    txn_hash = {'root_key': 1}
-    txn_str = '1'.zfill(ID_KEY_LENGTH)
-    entity = self.get_new_entity_proto(app, *self.BASIC_ENTITY[1:])
-
-    db_batch = flexmock()
-    db_batch.should_receive('valid_data_version').and_return(True)
-    dd = DatastoreDistributed(db_batch, None)
-
-    entities = [entity]
-    encoded_path = str(
-      dd.encode_index_pb(entity.key().path()))
-    txn_keys = [dd._SEPARATOR.join([app, txn_str, '', encoded_path])]
-    txn_values = {
-      txn_keys[0]: {
-        dbconstants.TRANSACTIONS_SCHEMA[0]: dbconstants.TxnActions.PUT,
-        dbconstants.TRANSACTIONS_SCHEMA[1]: entity.Encode(),
-        dbconstants.TRANSACTIONS_SCHEMA[2]: ''
-      }
-    }
-
-    flexmock(dd).should_receive('get_root_key').and_return('root_key')
-
-    db_batch.should_receive('batch_put_entity').with_args(
-      dbconstants.TRANSACTIONS_TABLE,
-      txn_keys,
-      dbconstants.TRANSACTIONS_SCHEMA,
-      txn_values,
-      ttl=TX_TIMEOUT * 2
-    )
-    dd.put_entities_txn(entities, txn_hash, app)
 
 if __name__ == "__main__":
   unittest.main()    

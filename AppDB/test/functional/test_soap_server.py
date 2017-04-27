@@ -2,12 +2,13 @@
 # Test for soap calls
 # Test each exit point on the soap calls
 
-import sys
 import os
-import helper_functions
-PYTHON_PATH = os.environ.get("PYTHONPATH")
-
 import SOAPpy
+import sys
+
+from appscale.datastore import helper_functions
+
+PYTHON_PATH = os.environ.get("PYTHONPATH")
 
 APPSCALE_HOME = os.environ.get("APPSCALE_HOME")
 if APPSCALE_HOME:
@@ -26,9 +27,9 @@ DEFAULT_PORT = 8080
 IP_TABLE = "IPS___"
 DEFAULT_ENCRYPTION = 1
 VALID_DATASTORES = []
-CERT_LOCATION = APPSCALE_HOME + "/.appscale/certs/mycert.pem"
-KEY_LOCATION = APPSCALE_HOME + "/.appscale/certs/mykey.pem"
-SECRET_LOCATION = APPSCALE_HOME + "/.appscale/secret.key"
+CERT_LOCATION = "/etc/appscale/certs/mycert.pem"
+KEY_LOCATION = "/etc/appscale/certs/mykey.pem"
+SECRET_LOCATION = "/etc/appscale/secret.key"
 user_location = DEFAULT_USER_LOCATION
 datastore_type = DEFAULT_DATASTORE
 encryptOn = DEFAULT_ENCRYPTION

@@ -29,8 +29,6 @@ import com.google.apphosting.utils.remoteapi.RemoteApiPb.Request;
 import com.google.apphosting.utils.remoteapi.RemoteApiPb.Response;
 import com.google.apphosting.api.ApiProxy;
 import com.google.appengine.api.taskqueue.TaskQueuePb;
-import com.google.appengine.api.taskqueue.TaskQueuePb.TaskQueueAddRequest;
-import com.google.appengine.api.taskqueue.TaskQueuePb.TaskQueueAddRequest.Header;
 import com.google.apphosting.utils.config.AppEngineWebXml;
 
 public class AppScaleTaskQueueClient {
@@ -44,7 +42,6 @@ public class AppScaleTaskQueueClient {
     private final String SERVICE_NAME = "taskqueue";
     private final String PROTOCOL_BUFFER_HEADER = "ProtocolBufferType";
     private final String PROTOCOL_BUFFER_VALUE = "Request";
-    private final String TASKQUEUE_IP_FILE = "/etc/appscale/rabbitmq_ip";
     private DefaultHttpClient client = null;
     private String url = null;
     private String appId = null;
@@ -55,7 +52,7 @@ public class AppScaleTaskQueueClient {
         ThreadSafeClientConnManager connManager = new ThreadSafeClientConnManager(schemeRegistry);
         connManager.setMaxTotal(MAX_TOTAL_CONNECTIONS);
         connManager.setDefaultMaxPerRoute(MAX_CONNECTIONS_PER_ROUTE);
-        String host = getTaskQueueIp();
+        String host = getTaskQueueProxy();
         url = "http://" + host + ":" + port + "/";
         HttpHost localhost = new HttpHost(url);
         connManager.setMaxForRoute(new HttpRoute(localhost), MAX_CONNECTIONS_PER_ROUTE_LOCALHOST);
@@ -99,6 +96,41 @@ public class AppScaleTaskQueueClient {
         TaskQueuePb.TaskQueueQueryAndOwnTasksResponse leaseResponse = new TaskQueuePb.TaskQueueQueryAndOwnTasksResponse();
         leaseResponse.parseFrom(response.getResponseAsBytes());
         return leaseResponse;
+    }
+
+    public TaskQueuePb.TaskQueueModifyTaskLeaseResponse modifyLease(TaskQueuePb.TaskQueueModifyTaskLeaseRequest modifyLeaseRequest) {
+        Request request = new Request();
+        request.setMethod("ModifyTaskLease");
+        request.setServiceName(SERVICE_NAME);
+        request.setRequestAsBytes(modifyLeaseRequest.toByteArray());
+        Response response = sendRequest(request);
+        if (response.hasApplicationError()) {
+            throw new ApiProxy.ApplicationException(
+                response.getApplicationError().getCode(),
+                "TaskQueue ModifyTaskLease operation failed"
+            );
+        }
+        TaskQueuePb.TaskQueueModifyTaskLeaseResponse modifyLeaseResponse = new TaskQueuePb.TaskQueueModifyTaskLeaseResponse();
+        modifyLeaseResponse.parseFrom(response.getResponseAsBytes());
+        return modifyLeaseResponse;
+    }
+
+    public TaskQueuePb.TaskQueueDeleteResponse delete(TaskQueuePb.TaskQueueDeleteRequest deleteRequest) {
+        deleteRequest.setAppId(getAppId());
+        Request request = new Request();
+        request.setMethod("Delete");
+        request.setServiceName(SERVICE_NAME);
+        request.setRequestAsBytes(deleteRequest.toByteArray());
+        Response response = sendRequest(request);
+        if (response.hasApplicationError()) {
+            throw new ApiProxy.ApplicationException(
+                response.getApplicationError().getCode(),
+                "TaskQueue Delete operation failed"
+            );
+        }
+        TaskQueuePb.TaskQueueDeleteResponse deleteResponse = new TaskQueuePb.TaskQueueDeleteResponse();
+        deleteResponse.parseFrom(response.getResponseAsBytes());
+        return deleteResponse;
     }
 
     public TaskQueuePb.TaskQueuePurgeQueueResponse purge(TaskQueuePb.TaskQueuePurgeQueueRequest purgeRequest) {
@@ -167,16 +199,9 @@ public class AppScaleTaskQueueClient {
         return this.appId;
     }
 
-    private String getTaskQueueIp() {
-        String ip = "";
-        try {
-            BufferedReader br = new BufferedReader(new FileReader(TASKQUEUE_IP_FILE));
-            ip = br.readLine();
-            br.close();
-        } catch (Exception e) {
-            logger.severe("Error getting ip from taskqueue ip file: " + e.getMessage());
-        }
-        return ip;
+    private String getTaskQueueProxy() {
+        String tqProxy = System.getProperty("TQ_PROXY");
+        return tqProxy;
     }
 
     private byte[] inputStreamToArray(InputStream in) {

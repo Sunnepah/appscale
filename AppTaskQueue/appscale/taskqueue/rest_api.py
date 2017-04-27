@@ -1,28 +1,28 @@
 """ Handlers for implementing v1beta2 of the taskqueue REST API. """
 import json
 import re
-import sys
 import tornado.escape
 
-from queue import InvalidLeaseRequest
-from queue import LONG_QUEUE_FORM
-from queue import PullQueue
-from queue import QUEUE_FIELDS
+from appscale.common.constants import HTTPCodes
 from task import InvalidTaskInfo
 from task import Task
 from task import TASK_FIELDS
 from tornado.web import MissingArgumentError
 from tornado.web import RequestHandler
-from unpackaged import APPSCALE_LIB_DIR
-
-sys.path.append(APPSCALE_LIB_DIR)
-from constants import HTTPCodes
+from .queue import (InvalidLeaseRequest,
+                    LONG_QUEUE_FORM,
+                    PullQueue,
+                    QUEUE_FIELDS,
+                    TransientError)
 
 # The prefix for all of the handlers of the pull queue REST API.
 REST_PREFIX = '/taskqueue/v1beta2/projects/(?:.~)?([a-z0-9-]+)/taskqueues'
 
 # Matches commas that are outside of parentheses.
 FIELD_DELIMITERS_RE = re.compile(r',(?=[^)]*(?:\(|$))')
+
+# Matches strings that only contain the URL-safe Base64 alphabet.
+BASE64_CHARS_RE = re.compile(r'^[a-zA-Z0-9-_=]*$')
 
 
 def parse_fields(fields_string):
@@ -146,7 +146,21 @@ class RESTTasks(RequestHandler):
                   'The request body must contain a task.')
       return
 
-    task = Task(task_info)
+    if 'payloadBase64' not in task_info:
+      write_error(self, HTTPCodes.BAD_REQUEST,
+                  'payloadBase64 must be specified.')
+      return
+
+    if not BASE64_CHARS_RE.match(task_info['payloadBase64']):
+      write_error(self, HTTPCodes.BAD_REQUEST,
+                  'Invalid payloadBase64 value.')
+      return
+
+    try:
+      task = Task(task_info)
+    except TypeError:
+      write_error(self, HTTPCodes.BAD_REQUEST, 'Invalid payloadBase64 value.')
+      return
 
     requested_fields = self.get_argument('fields', None)
     if requested_fields is None:
@@ -225,6 +239,9 @@ class RESTLease(RequestHandler):
       tasks = queue.lease_tasks(num_tasks, lease_seconds, group_by_tag, tag)
     except InvalidLeaseRequest as lease_error:
       write_error(self, HTTPCodes.BAD_REQUEST, lease_error.message)
+      return
+    except TransientError as lease_error:
+      write_error(self, HTTPCodes.INTERNAL_ERROR, str(lease_error))
       return
 
     task_list = {}

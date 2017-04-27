@@ -6,6 +6,7 @@ import json
 import socket
 import ssl
 import sys
+import yaml
 
 
 # Third-party imports
@@ -88,16 +89,15 @@ class AppControllerClient():
       return self.call(retries - 1, function, *args)
 
 
-  def set_parameters(self, locations, credentials, app=None):
+  def set_parameters(self, layout, options, app=None):
     """Passes the given parameters to an AppController, allowing it to start
     configuring API services in this AppScale deployment.
 
     Args:
-      locations: A list that contains the first node's IP address.
-      credentials: A list that contains API service-level configuration info,
+      layout: A list that contains the first node's IP address.
+      options: A list that contains API service-level configuration info,
         as well as a mapping of IPs to the API services they should host
         (excluding the first node).
-      app: A list of the App Engine apps that should be started.
     Raises:
       AppControllerException: If the remote AppController indicates that there
         was a problem with the parameters passed to it.
@@ -105,8 +105,8 @@ class AppControllerClient():
     if app is None:
       app = 'none'
 
-    result = self.call(self.MAX_RETRIES, self.server.set_parameters, locations, 
-      credentials, [app], self.secret)
+    result = self.call(self.MAX_RETRIES, self.server.set_parameters, layout,
+      options, [app], self.secret)
     if result.startswith('Error'):
       raise AppControllerException(result)
 
@@ -135,35 +135,6 @@ class AppControllerClient():
       self.secret))
 
 
-  def get_status(self):
-    """Queries the AppController to learn information about the machine it runs
-    on.
-
-    This includes information about the CPU, memory, and disk of that machine,
-    as well as what machine that AppController connects to for database access
-    (via the UserAppServer).
-
-    Returns:
-      A str containing information about the CPU, memory, and disk usage of that
-      machine, as well as where the UserAppServer is located.
-    """
-    return self.call(self.MAX_RETRIES, self.server.status, self.secret)
-
-
-  def get_api_status(self):
-    """Queries the AppController to see what the status of Google App Engine
-    APIs are in this AppScale deployment, reported to it by the API Checker.
-
-    APIs can be either 'running', 'failed', or 'unknown' (which typically
-    occurs when AppScale is first starting up).
-
-    Returns:
-      A dict that maps each API name (a str) to its status (also a str).
-    """
-    return json.loads(self.call(self.MAX_RETRIES, self.server.get_api_status,
-      self.secret))
-
-
   def get_database_information(self):
     """Queries the AppController to see what database is being used to implement
     support for the Google App Engine Datastore API, and how many replicas are
@@ -177,6 +148,25 @@ class AppControllerClient():
     return json.loads(self.call(self.MAX_RETRIES,
       self.server.get_database_information, self.secret))
 
+  def relocate_app(self, appid, http_port, https_port):
+    """Asks the AppController to start serving traffic for the named application
+    on the given ports, instead of the ports that it was previously serving at.
+
+    Args:
+      appid: A str that names the already deployed application that we want to
+        move to a different port.
+      http_port: An int between 80 and 90, or between 1024 and 65535, that names
+        the port that unencrypted traffic should be served from for this app.
+      https_port: An int between 443 and 453, or between 1024 and 65535, that
+        names the port that encrypted traffic should be served from for this
+        app.
+    Returns:
+      A str that indicates if the operation was successful, and in unsuccessful
+      cases, the reason why the operation failed.
+    """
+    res = (self.call(self.MAX_RETRIES, self.server.relocate_app,
+                     appid, http_port, https_port, self.secret))
+    return res
 
   def upload_app(self, filename, file_suffix, email):
     """Tells the AppController to use the AppScale Tools to upload the Google
@@ -210,7 +200,32 @@ class AppControllerClient():
       reservation_id, self.secret)
 
 
-  def get_stats(self):
+  def get_request_info(self, app_id):
+    """Queries the AppController to get request statistics for a given
+    application.
+    Args:
+      app_id: A String that indicates which application id we are querying for.
+    Returns:
+      A list of dicts, where each dict contains the average request rate,
+        timestamp, and total requests seen for the given application.
+    """
+    return yaml.safe_load(self.call(self.MAX_RETRIES,
+                                    self.server.get_request_info,
+                                    app_id, self.secret))
+
+  def get_instance_info(self):
+    """Queries the AppController to get server-level statistics and a list of
+    App Engine apps running in this cloud deployment across all machines.
+
+    Returns:
+      A list of dicts, where each dict contains information about the
+        AppServer processes hosting App Engine apps.
+    """
+    return yaml.safe_load(self.call(self.MAX_RETRIES,
+                                    self.server.get_instance_info,
+                                    self.secret))
+
+  def get_cluster_stats(self):
     """Queries the AppController to get server-level statistics and a list of
     App Engine apps running in this cloud deployment across all machines.
 
@@ -218,8 +233,18 @@ class AppControllerClient():
       A list of dicts, where each dict contains server-level statistics (e.g.,
         CPU, memory, disk usage) about one machine.
     """
-    return json.loads(self.call(self.MAX_RETRIES, self.server.get_stats_json,
-      self.secret))
+    return yaml.safe_load(self.call(self.MAX_RETRIES,
+                                    self.server.get_cluster_stats_json,
+                                    self.secret))
+
+  def get_application_cron_info(self, app_id):
+    """Queries the AppController to get application cron info (from cron.yaml and /etc/cron.d/).
+
+    Returns:
+      A dict that contains the cron.yaml and /etc/cron.d/appscale-#app_id files content
+    """
+    return json.loads(self.call(self.MAX_RETRIES, self.server.get_application_cron_info,
+      app_id, self.secret))
 
 
   def is_initialized(self):
@@ -334,20 +359,6 @@ class AppControllerClient():
       self.secret)
 
 
-  def remove_appserver_from_haproxy(self, app_id, appserver_ip, port):
-    """ Tells the AppController to stop routing traffic to an AppServer.
-
-    Args:
-      app_id: A string that contains the application ID.
-      appserver_ip: A string that contains the IP address of the instance
-        running the AppServer.
-      port: A string that contains the port that the AppServer listens on.
-    """
-    return self.call(self.MAX_RETRIES,
-      self.server.remove_appserver_from_haproxy, app_id, appserver_ip, port,
-      self.secret)
-
-
   def deployment_id_exists(self):
     """ Asks the AppController if the deployment ID is stored in ZooKeeper.
 
@@ -377,3 +388,20 @@ class AppControllerClient():
     """
     return self.call(self.MAX_RETRIES, self.server.set_read_only, read_only,
       self.secret)
+
+
+  def get_property(self, property_regex):
+    """Queries the AppController for a dictionary of its instance variables
+    whose names match the given regular expression, along with their associated
+    values.
+
+    Args:
+      property_regex: A str that names a regex of instance variables whose
+        values should be retrieved from the AppController.
+    Returns:
+      A dict mapping each instance variable matched by the given regex to its
+      value. This dict is empty when (1) no matches are found, or (2) if the
+      SOAP call times out.
+    """
+    return json.loads(self.call(self.MAX_RETRIES,
+      self.server.get_property, property_regex, self.secret))

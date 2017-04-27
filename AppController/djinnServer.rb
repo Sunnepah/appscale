@@ -51,48 +51,43 @@ class DjinnServer < SOAP::RPC::HTTPServer
     @djinn.job
   end
 
-  def djinn_locations
-    @djinn.djinn_locations
-  end
-
   def on_init
     @djinn = Djinn.new
 
     # Expose AppController methods to the outside world
     add_method(@djinn, "is_done_initializing", "secret")
+    add_method(@djinn, "receive_server_message", "timeout", "secret")
+    add_method(@djinn, "is_appscale_terminated", "secret")
+    add_method(@djinn, "run_terminate", "clean", "secret")
     add_method(@djinn, "is_done_loading", "secret")
     add_method(@djinn, "get_role_info", "secret")
     add_method(@djinn, "get_app_info_map", "secret")
     add_method(@djinn, "relocate_app", "appid", "http_port", "https_port",
       "secret")
     add_method(@djinn, "kill", "stop_deployment", "secret")
-    add_method(@djinn, "set_parameters", "djinn_locations",
-      "database_credentials", "app_names", "secret")
-    add_method(@djinn, "status", "secret")
-    add_method(@djinn, "get_stats", "secret")
-    add_method(@djinn, "get_stats_json", "secret")
+    add_method(@djinn, "set_parameters", "layout", "options", "secret")
+    add_method(@djinn, "get_cluster_stats_json", "secret")
+    add_method(@djinn, "get_application_cron_info", "app_name", "secret")
     add_method(@djinn, "upload_app", "archived_file", "file_suffix", "email",
       "secret")
     add_method(@djinn, "get_app_upload_status", "reservation_id", "secret")
     add_method(@djinn, "get_database_information", "secret")
-    add_method(@djinn, "get_api_status", "secret")
+    add_method(@djinn, "get_instance_info", "app_id", "secret")
+    add_method(@djinn, "get_request_info", "secret")
     add_method(@djinn, "stop_app", "app_name", "secret")
     add_method(@djinn, "update", "app_names", "secret")
     add_method(@djinn, "set_apps_to_restart", "apps_to_restart", "secret")
     add_method(@djinn, "get_all_public_ips", "secret")
+    add_method(@djinn, "get_all_private_ips", "secret")
     add_method(@djinn, "get_online_users_list", "secret")
     add_method(@djinn, "done_uploading", "appname", "location", "secret")
     add_method(@djinn, "is_app_running", "appname", "secret")
     add_method(@djinn, "backup_appscale", "backup_in_info", "secret")
-    add_method(@djinn, "add_role", "new_role", "secret")
-    add_method(@djinn, "remove_role", "old_role", "secret")
     add_method(@djinn, "start_roles_on_nodes", "ips_hash", "secret")
     add_method(@djinn, "gather_logs", "secret")
     add_method(@djinn, "add_routing_for_appserver", "app_id", "ip", "port",
       "secret")
     add_method(@djinn, "add_routing_for_blob_server", "secret")
-    add_method(@djinn, "remove_appserver_from_haproxy", "app_id", "ip", "port",
-      "secret")
     add_method(@djinn, "run_groomer", "secret")
     add_method(@djinn, "get_property", "property_regex", "secret")
     add_method(@djinn, "set_property", "property_name", "property_value",
@@ -102,7 +97,7 @@ class DjinnServer < SOAP::RPC::HTTPServer
     add_method(@djinn, "set_deployment_id", "secret")
     add_method(@djinn, "set_node_read_only", "read_only", "secret")
     add_method(@djinn, "set_read_only", "read_only", "secret")
-    add_method(@djinn, "get_all_stats", "secret")
+    add_method(@djinn, "get_node_stats_json", "secret")
     add_method(@djinn, "does_app_exist", "appname", "secret")
     add_method(@djinn, "reset_password", "username", "password", "secret")
     add_method(@djinn, "does_user_exist", "username", "secret")

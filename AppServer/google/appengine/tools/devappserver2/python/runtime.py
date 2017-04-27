@@ -58,7 +58,8 @@ def setup_stubs(config):
   """Sets up API stubs using remote API."""
   remote_api_stub.ConfigureRemoteApi(config.app_id, '/', lambda: ('', ''),
                                      'localhost:%d' % config.api_port,
-                                     use_remote_datastore=False)
+                                     use_remote_datastore=False,
+                                     use_async_rpc=True)
 
   if config.HasField('cloud_sql_config'):
     # Connect the RDBMS API to MySQL.
@@ -124,12 +125,14 @@ def main():
                                                       traceback.format_exc())
 
   my_ip_address = None
-  with open('/etc/appscale/my_public_ip') as file_handle:
+  with open('/etc/appscale/my_private_ip') as file_handle:
     my_ip_address = file_handle.read().strip()
 
   nginx_host = None
   with open('/etc/appscale/login_ip') as file_handle:
-    nginx_host = file_handle.read().strip()
+    raw_ips = file_handle.read()
+    ips = raw_ips.split('\n')
+    nginx_host = ips[0]
 
   if debugging_app:
     server = wsgi_server.WsgiServer(

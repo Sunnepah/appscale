@@ -1,19 +1,14 @@
 #!/usr/bin/env python
 # Programmer: Navraj Chohan
 
-import os
-import sys
 import unittest
 
+from appscale.common import file_io
+from appscale.datastore.cassandra_env import cassandra_interface
 from cassandra.cluster import Cluster
 from cassandra.query import BatchStatement
 from flexmock import flexmock
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
-from cassandra_env import cassandra_interface
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../../lib/"))  
-import file_io
 
 class TestCassandra(unittest.TestCase):
   def testConstructor(self):
@@ -90,6 +85,7 @@ class TestCassandra(unittest.TestCase):
     db = cassandra_interface.DatastoreProxy()
 
     db.batch_mutate(app_id, [], [], transaction)
+
 
 if __name__ == "__main__":
   unittest.main()    

@@ -69,15 +69,6 @@ namespace :apptaskqueue do
 
 end
 
-namespace :go do
-
-  task :test do
-    goroot = '/root/appscale/AppServer/goroot'
-    sh "PATH=#{goroot}/bin:${PATH}; cd #{goroot}/src; ./run.bash --no-rebuild"
-  end
-
-end
-
 namespace :hermes do
 
   task :test do
@@ -106,10 +97,10 @@ namespace :appserver do
 end
 
 
-namespace :lib do
+namespace :common do
 
   task :test do
-    sh 'python -m unittest discover -b -v -s lib/test/unit'
+    sh 'python -m unittest discover -b -v -s common/test/unit'
   end
 
 end
@@ -153,16 +144,13 @@ python_tests = [
   'appmanager:test',
   'appserver:test',
   'apptaskqueue:test',
+  'common:test',
   'hermes:test',
   'infrastructuremanager:test',
-  'lib:test',
   'searchservice:test',
   'xmppreceiver:test',
   'apps:test'
 ]
 ruby_tests = ['appcontroller:test']
-go_tests = ['go:test']
 
-task :brief => python_tests + ruby_tests
-
-task :default => python_tests + ruby_tests + go_tests
+task :default => python_tests + ruby_tests

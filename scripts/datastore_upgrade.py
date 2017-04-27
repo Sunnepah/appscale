@@ -1,6 +1,5 @@
 """ This script performs a data upgrade. """
 
-import cassandra
 import json
 import logging
 import math
@@ -9,27 +8,25 @@ import subprocess
 import sys
 import time
 
+from appscale.datastore import appscale_datastore_batch
+from appscale.datastore import dbconstants
+from appscale.datastore.dbconstants import APP_ENTITY_SCHEMA
+from appscale.datastore.dbconstants import APP_ENTITY_TABLE
+from appscale.datastore.dbconstants import ID_KEY_LENGTH
+from appscale.datastore.dbconstants import TOMBSTONE
+from appscale.datastore.cassandra_env import cassandra_interface
+from appscale.datastore.zkappscale import zktransaction as zk
+from appscale.datastore.zkappscale.zktransaction import ZK_SERVER_CMD_LOCATIONS
+from appscale.datastore.zkappscale.zktransaction import ZKInternalException
 from cassandra.query import ConsistencyLevel
 from cassandra.query import SimpleStatement
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../lib'))
-import appscale_info
-from constants import APPSCALE_HOME
-from constants import CONTROLLER_SERVICE
-from constants import LOG_DIR
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '../AppDB'))
-import appscale_datastore_batch
-import datastore_server
-import dbconstants
-
-from cassandra_env import cassandra_interface
-from datastore_server import ID_KEY_LENGTH
-from dbconstants import APP_ENTITY_SCHEMA
-from dbconstants import APP_ENTITY_TABLE
-from zkappscale import zktransaction as zk
-from zkappscale.zktransaction import ZK_SERVER_CMD_LOCATIONS
-from zkappscale.zktransaction import ZKInternalException
+from appscale.common import appscale_info
+from appscale.common.constants import (
+  APPSCALE_HOME,
+  CONTROLLER_SERVICE,
+  LOG_DIR
+)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../InfrastructureManager"))
 from utils import utils
@@ -81,19 +78,22 @@ def ensure_app_is_not_running():
     sys.exit(1)
 
 
-def start_cassandra(db_ips, db_master, keyname):
+def start_cassandra(db_ips, db_master, keyname, zookeeper_ips):
   """ Creates a monit configuration file and prompts Monit to start Cassandra.
   Args:
     db_ips: A list of database node IPs to start Cassandra on.
     db_master: The IP address of the DB master.
     keyname: A string containing the deployment's keyname.
+    zookeeper_ips: The IP addresses of the Zookeeper nodes.
   Raises:
     AppScaleDBError if unable to start Cassandra.
   """
   logging.info("Starting Cassandra...")
   for ip in db_ips:
-    init_config = '{script} --local-ip {ip} --master-ip {db_master}'.format(
-      script=SETUP_CASSANDRA_SCRIPT, ip=ip, db_master=db_master)
+    init_config = '{script} --local-ip {ip} --master-ip {db_master} ' \
+                  '--zk-locations {zk_locations}'.format(
+                  script=SETUP_CASSANDRA_SCRIPT, ip=ip, db_master=db_master,
+                  zk_locations=get_zk_locations_string(zookeeper_ips))
     try:
       utils.ssh(ip, keyname, init_config)
     except subprocess.CalledProcessError:
@@ -292,7 +292,7 @@ def process_entity(entity, datastore, zookeeper):
   valid_entity = validate_row(app_id, entity, zookeeper, datastore)
 
   if (valid_entity is None or
-      valid_entity[key][APP_ENTITY_SCHEMA[0]] == datastore_server.TOMBSTONE):
+      valid_entity[key][APP_ENTITY_SCHEMA[0]] == TOMBSTONE):
     delete_entity_from_table(key, datastore)
     return
 
@@ -407,8 +407,7 @@ def estimate_total_entities(session, db_master, keyname):
   try:
     rows = session.execute(query)[0].count
     return str(rows / len(dbconstants.APP_ENTITY_SCHEMA))
-  except (cassandra.Unavailable, cassandra.Timeout,
-          cassandra.CoordinationFailure, cassandra.OperationTimedOut):
+  except dbconstants.TRANSIENT_CASSANDRA_ERRORS:
     stats_cmd = '{nodetool} cfstats {keyspace}.{table}'.format(
       nodetool=cassandra_interface.NODE_TOOL,
       keyspace=cassandra_interface.KEYSPACE,

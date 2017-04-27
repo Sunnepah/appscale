@@ -1,4 +1,6 @@
 $:.unshift File.join(File.dirname(__FILE__), "lib")
+require 'fileutils'
+
 APPSCALE_CONFIG_DIR = "/etc/appscale"
 
 module TerminateHelper
@@ -12,15 +14,14 @@ module TerminateHelper
     `rm -f #{APPSCALE_CONFIG_DIR}/secret.key`
     `rm -f /tmp/uploaded-apps`
     `rm -f ~/.appscale_cookies`
-    `rm -f /var/appscale/*.pid`
-    `rm -f /etc/nginx/sites-enabled/*.conf`
+    `rm -f /etc/nginx/sites-enabled/appscale-*.conf`
     `rm -f /etc/haproxy/sites-enabled/*.cfg`
     `service nginx reload`
-    # Stop and then remove the service we configured with monit.
-    `monit stop all`
     while system("monit summary | grep Running > /dev/null") do
+      # Stop and then remove the service we configured with monit.
+      `monit stop all`
       puts "Waiting for monit to stop services ..."
-      Kernel.sleep(2)
+      Kernel.sleep(10)
     end
 
     `rm -f /etc/monit/conf.d/appscale*.cfg`
@@ -33,12 +34,25 @@ module TerminateHelper
     `/usr/bin/python2 /root/appscale/scripts/stop_service.py /root/appscale/AppController/djinnServer.rb /usr/bin/ruby`
     `monit start all`
     `rm -f #{APPSCALE_CONFIG_DIR}/port-*.txt`
-    `rm -f #{APPSCALE_CONFIG_DIR}/search_ip`
+
+    # Remove location files.
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/all_ips")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/load_balancer_ips")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/login_ip")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/masters")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/memcache_ips")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/my_private_ip")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/my_public_ip")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/num_of_nodes")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/search_ip")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/slaves")
+    FileUtils.rm_f("#{APPSCALE_CONFIG_DIR}/taskqueue_nodes")
 
     # TODO: Use the constant in djinn.rb (ZK_LOCATIONS_FILE)
     `rm -rf #{APPSCALE_CONFIG_DIR}/zookeeper_locations.json`
     `rm -f /opt/appscale/appcontroller-state.json`
     `rm -f /opt/appscale/appserver-state.json`
+    print "OK"
   end
 
   # This functions does erase more of appscale state: used in combination
@@ -59,11 +73,13 @@ module TerminateHelper
     # Delete stored data.
     `rm -rf /opt/appscale/cassandra`
     `rm -rf /opt/appscale/zookeeper`
+    `rm -rf /opt/appscale/logserver/*`
     `rm -rf /opt/appscale/apps`
     `rm -rf /opt/appscale/solr`
     `rm -rf /var/lib/rabbitmq/*`
     `rm -rf /etc/appscale/celery/`
     `rm -rf /opt/appscale/celery`
+    print "OK"
   end
 
   # Tells any services that persist data across AppScale runs to stop writing
