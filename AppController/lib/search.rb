@@ -18,7 +18,7 @@ require 'monit_interface'
 module Search
 
   # AppScale install directory.
-  APPSCALE_HOME = ENV["APPSCALE_HOME"]
+  APPSCALE_HOME = ENV["APPSCALE_HOME"] || File.join('/', 'root', 'appscale')
 
   # The port that SOLR server runs on, by default.
   SOLR_SERVER_PORT = 8983
@@ -29,11 +29,11 @@ module Search
   # The python executable path.
   PYTHON_EXEC = "python"
 
-  # Stop command for search server.
-  SEARCH_STOP_CMD = "/bin/kill -9 `ps aux | grep search_server.py | awk {'print $2'}`"
-
   # Search location file.
   SEARCH_LOCATION_FILE = "/etc/appscale/search_ip"
+
+  # The location of SOLR source code.
+  SOLR_CODE_DIR = File.join(APPSCALE_HOME, 'SearchService', 'solr', 'solr')
 
   # SOLR persistent state location.
   SOLR_STATE_DIR = "/opt/appscale/solr/data"
@@ -63,10 +63,10 @@ module Search
     Djinn.log_debug("Starting SOLR.")
     Djinn.log_run("mkdir -p #{SOLR_STATE_DIR}")
     Djinn.log_run("cp -r /root/appscale/SearchService/templates/schemaless-appscale /opt/appscale/solr/")
-    start_cmd = "/root/appscale/SearchService/solr/solr/bin/solr start -noprompt -s /opt/appscale/solr/schemaless-appscale/solr/"
-    stop_cmd = "/root/appscale/SearchService/solr/solr/bin/solr stop -all"
-    MonitInterface.start(:solr, start_cmd, stop_cmd, ports=SOLR_SERVER_PORT,
-      env_vars=nil, match_cmd="solr")
+    start_cmd = "#{SOLR_CODE_DIR}/bin/solr start -noprompt -s /opt/appscale/solr/schemaless-appscale/solr/"
+    stop_cmd = "#{SOLR_CODE_DIR}/bin/solr stop -all"
+    pidfile = "#{SOLR_CODE_DIR}/bin/solr-#{SOLR_SERVER_PORT}.pid"
+    MonitInterface.start_daemon(:solr, start_cmd, stop_cmd, pidfile)
     HelperFunctions.sleep_until_port_is_open("localhost", SOLR_SERVER_PORT)
     Djinn.log_debug("Done starting SOLR.")
   end
@@ -76,10 +76,7 @@ module Search
     Djinn.log_debug("Starting search server on this node.")
     script = "#{APPSCALE_HOME}/SearchService/search_server.py"
     start_cmd = "#{PYTHON_EXEC} #{script}"
-    stop_cmd = SEARCH_STOP_CMD
-    env_vars = {}
-    MonitInterface.start(:search, start_cmd, stop_cmd, SEARCH_SERVER_PORT,
-      env_vars)
+    MonitInterface.start(:search, start_cmd)
     HelperFunctions.sleep_until_port_is_open("localhost", SEARCH_SERVER_PORT)
     Djinn.log_debug("Done starting search_server on this node.")
   end

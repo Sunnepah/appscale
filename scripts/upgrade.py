@@ -1,6 +1,7 @@
 """ This script checks and performs an upgrade (if any) is needed for this deployment. """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -11,9 +12,12 @@ from datastore_upgrade import run_datastore_upgrade
 from datastore_upgrade import start_cassandra
 from datastore_upgrade import start_zookeeper
 from datastore_upgrade import write_to_json_file
+from kazoo.client import KazooClient
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../lib'))
-from constants import LOG_FORMAT
+from appscale.datastore.dbconstants import AppScaleDBError
+
+from appscale.common.constants import LOG_FORMAT
+from appscale.common.constants import ZK_CASSANDRA_CONFIG
 
 sys.path.append\
   (os.path.join(os.path.dirname(__file__), '../InfrastructureManager'))
@@ -55,8 +59,13 @@ if __name__ == "__main__":
     for ip in relevant_ips:
       utils.ssh(ip, args.keyname, 'service monit start')
 
-    start_cassandra(args.database, args.db_master, args.keyname)
     start_zookeeper(args.zookeeper, args.keyname)
+    conn = KazooClient(hosts=",".join(args.zookeeper))
+    conn.start()
+    if not conn.exists(ZK_CASSANDRA_CONFIG):
+      conn.create(ZK_CASSANDRA_CONFIG, json.dumps({"num_tokens":256}),
+                  makepath=True)
+    start_cassandra(args.database, args.db_master, args.keyname, args.zookeeper)
     datastore_upgrade.wait_for_quorum(
       args.keyname, len(args.database), args.replication)
     db_access = datastore_upgrade.get_datastore()
@@ -67,7 +76,13 @@ if __name__ == "__main__":
       sys.exit()
 
     zookeeper = datastore_upgrade.get_zookeeper(args.zookeeper)
-    run_datastore_upgrade(db_access, zookeeper, args.keyname, args.log_postfix)
+    try:
+      total_entities = datastore_upgrade.estimate_total_entities(
+        db_access.session, args.db_master, args.keyname)
+    except AppScaleDBError:
+      total_entities = None
+    run_datastore_upgrade(db_access, zookeeper, args.log_postfix,
+                          total_entities)
     status = {'status': 'complete', 'message': 'Data layout upgrade complete'}
   except Exception as error:
     status = {'status': 'error', 'message': error.message}

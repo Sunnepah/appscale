@@ -40,7 +40,8 @@ class DjinnJobData
     end
 
     @cloud = "cloud1"
-    @instance_id = json_data['instance_id']
+    @instance_id = 'i-APPSCALE'
+    @instance_id = json_data['instance_id'] if json_data['instance_id']
     @disk = json_data['disk']
     @ssh_key = File.expand_path("/etc/appscale/keys/#{@cloud}/#{keyname}.key")
   end
@@ -102,7 +103,7 @@ class DjinnJobData
 
 
   # method_missing: will intercept calls to is_load_balancer?, is_appengine?
-  # and so on, without having all these methods to copy pasta
+  # and so on, without having all these methods to copy paste
   # as of writing this only the two named methods are in use
   # TODO: remove this and place dynamic method adds in initialize
   def method_missing(id, *args, &block)

@@ -39,8 +39,7 @@ from google.appengine.tools.devappserver2 import shutdown
 from google.appengine.tools.devappserver2 import update_checker
 from google.appengine.tools.devappserver2 import wsgi_request_info
 
-sys.path.append("/root/appscale/lib")
-import appscale_info
+from appscale.common import appscale_info
 
 # Initialize logging early -- otherwise some library packages may
 # pre-empt our log formatting.  NOTE: the level is provisional; it may
@@ -458,6 +457,7 @@ def create_command_line_parser():
     const=True,
     default=False,
     help='if this application can read data stored by other applications.')
+  appscale_group.add_argument('--pidfile', help='create pidfile at location')
 
   return parser
 
@@ -717,6 +717,11 @@ def main():
   os.environ['MY_PORT'] = str(options.port)
   os.environ['COOKIE_SECRET'] = appscale_info.get_secret()
   os.environ['NGINX_HOST'] = options.nginx_host
+
+  if options.pidfile:
+    with open(options.pidfile, 'w') as pidfile:
+      pidfile.write(str(os.getpid()))
+
   dev_server = DevelopmentServer()
   try:
     dev_server.start(options)

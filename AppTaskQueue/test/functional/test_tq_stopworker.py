@@ -1,15 +1,11 @@
 #!/usr/bin/env python
 
-import httplib
 import json
-import os
 import socket
-import sys
 import unittest
 import urllib2
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../../lib"))
-import file_io
+from appscale.common import file_io
 
 FILE_LOC = "/tmp/queue.yaml"
 def create_test_yaml():
@@ -29,7 +25,7 @@ class TestTaskQueueServer(unittest.TestCase):
   def test_slave(self):
     values = {'app_id':'hawkeyepythonapp'}
     host = socket.gethostbyname(socket.gethostname())
-    req = urllib2.Request('http://' + host + ':64839/stopworker')
+    req = urllib2.Request('http://' + host + ':17446/stopworker')
     req.add_header('Content-Type', 'application/json')
     response = urllib2.urlopen(req, json.dumps(values))
     print response.read()

@@ -1,10 +1,12 @@
 """ This service starts and stops application servers of a given application. """
 
+import fnmatch
 import glob
 import json
 import logging
 import math
 import os
+import shutil
 import SOAPpy
 import subprocess
 import sys
@@ -15,16 +17,20 @@ from xml.etree import ElementTree
 
 from M2Crypto import SSL
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../lib/"))
-import appscale_info
-import constants
-import file_io
-import monit_app_configuration
-from monit_app_configuration import MONIT_CONFIG_DIR
-import monit_interface
-import misc
+from appscale.common import (
+  appscale_info,
+  constants,
+  file_io,
+  monit_app_configuration,
+  monit_interface,
+  misc
+)
+from appscale.common.deployment_config import DeploymentConfig
+from appscale.common.deployment_config import ConfigInaccessible
+from appscale.common.monit_app_configuration import MONIT_CONFIG_DIR
+from appscale.common.unpackaged import APPSCALE_PYTHON_APPSERVER
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../AppServer'))
+sys.path.append(APPSCALE_PYTHON_APPSERVER)
 from google.appengine.api.appcontroller_client import AppControllerClient
 
 # The amount of seconds to wait for an application to start up.
@@ -53,8 +59,7 @@ REQUIRED_CONFIG_FIELDS = [
   'app_name',
   'app_port',
   'language',
-  'load_balancer_ip',
-  'xmpp_ip',
+  'login_ip',
   'env_vars',
   'max_memory']
 
@@ -74,13 +79,20 @@ TRUSTED_FLAG = "--trusted"
 # The location on the filesystem where the PHP executable is installed.
 PHP_CGI_LOCATION = "/usr/bin/php-cgi"
 
-# Load balancing path for datastore.
-DATASTORE_PATH = "localhost"
+# The location of the App Engine SDK for Go.
+GO_SDK = os.path.join('/', 'opt', 'go_appengine')
 
 HTTP_OK = 200
 
 # The amount of seconds to wait before retrying to add routing.
 ROUTING_RETRY_INTERVAL = 5
+
+PIDFILE_TEMPLATE = os.path.join('/', 'var', 'run', 'appscale',
+                                'app___{project}-{port}.pid')
+
+# A DeploymentConfig accessor.
+deployment_config = None
+
 
 class BadConfigurationException(Exception):
   """ An application is configured incorrectly. """
@@ -138,6 +150,15 @@ def add_routing(app, port):
     app: A string that contains the application ID.
     port: A string that contains the port that the AppServer listens on.
   """
+  logging.info("Waiting for application {} on port {} to be active.".
+    format(str(app), str(port)))
+  if not wait_on_app(port):
+    # In case the AppServer fails we let the AppController to detect it
+    # and remove it if it still show in monit.
+    logging.warning("AppServer did not come up in time, for {}:{}.".
+      format(str(app), str(port)))
+    return
+
   acc = appscale_info.get_appcontroller_client()
   appserver_ip = appscale_info.get_private_ip()
 
@@ -152,17 +173,6 @@ def add_routing(app, port):
   logging.info('Successfully established routing for {} on port {}'.
     format(app, port))
 
-def remove_routing(app, port):
-  """ Tells the AppController to stop routing traffic to an AppServer.
-
-  Args:
-    app: A string that contains the application ID.
-    port: A string that contains the port that the AppServer listens on.
-  """
-  acc = appscale_info.get_appcontroller_client()
-  appserver_ip = appscale_info.get_private_ip()
-  acc.remove_appserver_from_haproxy(app, appserver_ip, port)
-
 def start_app(config):
   """ Starts a Google App Engine application on this machine. It
       will start it up and then proceed to fetch the main page.
@@ -172,8 +182,7 @@ def start_app(config):
        app_name: Name of the application to start
        app_port: Port to start on
        language: What language the app is written in
-       load_balancer_ip: Public ip of load balancer
-       xmpp_ip: IP of XMPP service
+       login_ip: Public ip of deployment
        env_vars: A dict of environment variables that should be passed to the
         app.
        max_memory: An int that names the maximum amount of memory that this
@@ -195,32 +204,51 @@ def start_app(config):
     config['language'], config['app_name']))
 
   env_vars = config['env_vars']
-  env_vars['GOPATH'] = '/root/appscale/AppServer/gopath/'
-  env_vars['GOROOT'] = '/root/appscale/AppServer/goroot/'
+  pidfile = PIDFILE_TEMPLATE.format(project=config['app_name'],
+                                    port=config['app_port'])
+
+  if config['language'] == constants.GO:
+    env_vars['GOPATH'] = os.path.join('/var', 'apps', config['app_name'],
+                                      'gopath')
+    env_vars['GOROOT'] = os.path.join(GO_SDK, 'goroot')
+
   watch = "app___" + config['app_name']
+  match_cmd = ""
 
   if config['language'] == constants.PYTHON27 or \
       config['language'] == constants.GO or \
       config['language'] == constants.PHP:
     start_cmd = create_python27_start_cmd(
       config['app_name'],
-      config['load_balancer_ip'],
+      config['login_ip'],
       config['app_port'],
-      config['load_balancer_ip'],
-      config['xmpp_ip'])
+      pidfile)
     stop_cmd = create_python27_stop_cmd(config['app_port'])
     env_vars.update(create_python_app_env(
-      config['load_balancer_ip'],
+      config['login_ip'],
       config['app_name']))
   elif config['language'] == constants.JAVA:
     remove_conflicting_jars(config['app_name'])
     copy_successful = copy_modified_jars(config['app_name'])
     if not copy_successful:
       return BAD_PID
+
+    # Account for MaxPermSize (~170MB), the parent process (~50MB), and thread
+    # stacks (~20MB).
+    max_heap = config['max_memory'] - 250
+    if max_heap <= 0:
+      return BAD_PID
     start_cmd = create_java_start_cmd(
       config['app_name'],
       config['app_port'],
-      config['load_balancer_ip'])
+      config['login_ip'],
+      max_heap,
+      pidfile
+    )
+    match_cmd = "java -ea -cp.*--port={}.*{}".format(str(config['app_port']),
+      os.path.dirname(locate_dir("/var/apps/" + config['app_name'] + "/app/",
+      "WEB-INF")))
+
     stop_cmd = create_java_stop_cmd(config['app_port'])
     env_vars.update(create_java_app_env(config['app_name']))
   else:
@@ -237,25 +265,26 @@ def start_app(config):
   if 'syslog_server' in config:
     syslog_server = config['syslog_server']
   monit_app_configuration.create_config_file(
-    str(watch),
-    str(start_cmd),
-    str(stop_cmd),
-    [config['app_port']],
+    watch,
+    start_cmd,
+    pidfile,
+    config['app_port'],
     env_vars,
     config['max_memory'],
     syslog_server,
-    appscale_info.get_private_ip())
+    check_port=True)
 
-  if not monit_interface.start(watch):
-    logging.error("Unable to start application server with monit")
+  # We want to tell monit to start the single process instead of the
+  # group, since monit can get slow if there are quite a few processes in
+  # the same group.
+  full_watch = "{}-{}".format(str(watch), str(config['app_port']))
+  if not monit_interface.start(full_watch, is_group=False):
+    logging.warning("Monit was unable to start {}:{}".
+      format(str(config['app_name']), config['app_port']))
     return BAD_PID
 
-  if not wait_on_app(int(config['app_port'])):
-    logging.error("Application server did not come up in time, "
-      "removing monit watch")
-    monit_interface.stop(watch)
-    return BAD_PID
-
+  # Since we are going to wait, possibly for a long time for the
+  # application to be ready, we do it in a thread.
   threading.Thread(target=add_routing,
     args=(config['app_name'], config['app_port'])).start()
 
@@ -270,7 +299,6 @@ def start_app(config):
   if not setup_logrotate(config['app_name'], watch, log_size):
     logging.error("Error while setting up log rotation for application: {}".
       format(config['app_name']))
-
 
   return 0
 
@@ -324,9 +352,6 @@ def stop_app_instance(app_name, port):
       "invalid name for application" % (app_name, int(port)))
     return False
 
-  logging.info('Removing routing for {} on port {}'.format(app_name, port))
-  remove_routing(app_name, port)
-
   logging.info("Stopping application %s" % app_name)
   watch = "app___" + app_name + "-" + str(port)
   if not monit_interface.stop(watch, is_group=False):
@@ -344,25 +369,6 @@ def stop_app_instance(app_name, port):
 
   return True
 
-def restart_app_instances_for_app(app_name, language):
-  """ Restarts all instances of a Google App Engine application on this machine.
-
-  Args:
-    app_name: The application ID corresponding to the app to restart.
-    language: The language the application is written in.
-  Returns:
-    True if successful, and False otherwise.
-  """
-  if not misc.is_app_name_valid(app_name):
-    logging.error("Unable to kill app process %s on because of " \
-      "invalid name for application" % (app_name))
-    return False
-  if language == "java":
-    remove_conflicting_jars(app_name)
-    copy_modified_jars(app_name)
-  logging.info("Restarting application %s" % app_name)
-  watch = "app___" + app_name
-  return monit_interface.restart(watch)
 
 def stop_app(app_name):
   """ Stops all process instances of a Google App Engine application on this
@@ -539,22 +545,30 @@ def create_java_app_env(app_name):
   custom_env_vars = extract_env_vars_from_xml(config_file)
   env_vars.update(custom_env_vars)
 
+  gcs_config = {'scheme': 'https', 'port': 443}
+  try:
+    gcs_config.update(deployment_config.get_config('gcs'))
+  except ConfigInaccessible:
+    logging.warning('Unable to fetch GCS configuration.')
+
+  if 'host' in gcs_config:
+    env_vars['GCS_HOST'] = '{scheme}://{host}:{port}'.format(**gcs_config)
+
   return env_vars
 
-def create_python27_start_cmd(app_name,
-  login_ip, port, load_balancer_host, xmpp_ip):
+def create_python27_start_cmd(app_name, login_ip, port, pidfile):
   """ Creates the start command to run the python application server.
 
   Args:
     app_name: The name of the application to run
-    login_ip: The public IP
+    login_ip: The public IP of this deployment
     port: The local port the application server will bind to
-    load_balancer_host: The host of the load balancer
-    xmpp_ip: The IP of the XMPP service
+    pidfile: A string specifying the pidfile location.
   Returns:
     A string of the start command.
   """
-  db_location = DATASTORE_PATH
+  db_proxy = appscale_info.get_db_proxy()
+
   cmd = [
     "/usr/bin/python2",
     constants.APPSCALE_HOME + "/AppServer/dev_appserver.py",
@@ -562,17 +576,20 @@ def create_python27_start_cmd(app_name,
     "--admin_port " + str(port + 10000),
     "--login_server " + login_ip,
     "--skip_sdk_update_check",
-    "--nginx_host " + str(load_balancer_host),
+    "--nginx_host " + str(login_ip),
     "--require_indexes",
     "--enable_sendmail",
-    "--xmpp_path " + xmpp_ip,
+    "--xmpp_path " + login_ip,
     "--php_executable_path=" + str(PHP_CGI_LOCATION),
-    "--uaserver_path " + db_location + ":"\
+    "--uaserver_path " + db_proxy + ":"\
       + str(constants.UA_SERVER_PORT),
-    "--datastore_path " + db_location + ":"\
+    "--datastore_path " + db_proxy + ":"\
       + str(constants.DB_SERVER_PORT),
     "/var/apps/" + app_name + "/app",
-    "--host " + appscale_info.get_private_ip()]
+    "--host " + appscale_info.get_private_ip(),
+    "--admin_host " + appscale_info.get_private_ip(),
+    "--automatic_restart", "no",
+    "--pidfile", pidfile]
 
   if app_name in TRUSTED_APPS:
     cmd.extend([TRUSTED_FLAG])
@@ -621,17 +638,14 @@ def remove_conflicting_jars(app_name):
     logging.warn("Lib directory not found in app code while updating.")
     return
   logging.info("Removing jars from {0}".format(lib_dir))
-  subprocess.call("rm -f " + lib_dir + \
-    "/appengine-api-1.0-sdk-*.jar", shell=True)
-  subprocess.call("rm -f " + lib_dir + \
-    "/appengine-api-stubs-*.jar", shell=True)
-  subprocess.call("rm -f " + lib_dir + \
-    "/appengine-api-labs-*.jar", shell=True)
-  subprocess.call("rm -f " + lib_dir + \
-    "/appengine-jsr107cache-*.jar", shell=True)
-  subprocess.call("rm -f " + lib_dir + \
-    "/jsr107cache-*.jar", shell=True)
-
+  conflicting_jars_pattern = ['appengine-api-1.0-sdk-*.jar', 'appengine-api-stubs-*.jar',
+                  'appengine-api-labs-*.jar', 'appengine-jsr107cache-*.jar',
+                  'jsr107cache-*.jar', 'appengine-mapreduce*.jar',
+                  'appengine-pipeline*.jar', 'appengine-gcs-client*.jar']
+  for file in os.listdir(lib_dir):
+    for pattern in conflicting_jars_pattern:
+      if fnmatch.fnmatch(file, pattern):
+        os.remove(lib_dir + os.sep + file)
 
 def copy_modified_jars(app_name):
   """ Copies the changes made to the Java SDK
@@ -658,52 +672,66 @@ def copy_modified_jars(app_name):
       logging.error("Failed to create missing lib directory in: {0}.".
         format(web_inf_dir))
       return False
-
-  cp_result = subprocess.call("cp " +  appscale_home + "/AppServer_Java/" +\
-    "appengine-java-sdk-repacked/lib/user/*.jar " + lib_dir, shell=True)
-  if cp_result != 0:
-    logging.error("Failed to copy appengine-java-sdk-repacked/lib/user jars " +\
-      "to lib directory of " + app_name)
+  try:
+    copy_files_matching_pattern(appscale_home + "/AppServer_Java/" +\
+                "appengine-java-sdk-repacked/lib/user/*.jar", lib_dir)
+    copy_files_matching_pattern(appscale_home + "/AppServer_Java/" +\
+                "appengine-java-sdk-repacked/lib/impl/appscale-*.jar", lib_dir)
+    copy_files_matching_pattern("/usr/share/appscale/ext/*", lib_dir)
+  except IOError as io_error:
+    logging.error("Failed to copy modified jar files to lib directory of " + app_name +\
+                  " due to:" + str(io_error))
     return False
-
-  cp_result = subprocess.call("cp " + appscale_home + "/AppServer_Java/" +\
-    "appengine-java-sdk-repacked/lib/impl/appscale-*.jar " + lib_dir, shell=True)
-
-  if cp_result != 0:
-    logging.error("Failed to copy email jars to lib directory of " + app_name)
-    return False
-
   return True
 
-def create_java_start_cmd(app_name, port, load_balancer_host):
+def copy_files_matching_pattern(file_path_pattern, dest):
+  """ Copies files matching the specified pattern to the destination directory.
+  Args:
+      file_path_pattern: The pattern of the files to be copied over.
+      dest: The destination directory.
+  """
+  for file in glob.glob(file_path_pattern):
+    shutil.copy(file, dest)
+
+def create_java_start_cmd(app_name, port, load_balancer_host, max_heap,
+                          pidfile):
   """ Creates the start command to run the java application server.
 
   Args:
     app_name: The name of the application to run
     port: The local port the application server will bind to
     load_balancer_host: The host of the load balancer
+    max_heap: An integer specifying the max heap size in MB.
+    pidfile: A string specifying the pidfile location.
   Returns:
     A string of the start command.
   """
-  db_location = DATASTORE_PATH
+  db_proxy = appscale_info.get_db_proxy()
+  tq_proxy = appscale_info.get_tq_proxy()
+  java_start_script = os.path.join(
+    constants.JAVA_APPSERVER, 'appengine-java-sdk-repacked', 'bin',
+    'dev_appserver.sh')
 
   # The Java AppServer needs the NGINX_PORT flag set so that it will read the
   # local FS and see what port it's running on. The value doesn't matter.
   cmd = [
-    "cd " + constants.JAVA_APPSERVER + " &&",
-    "./appengine-java-sdk-repacked/bin/dev_appserver.sh",
+    java_start_script,
     "--port=" + str(port),
     #this jvm flag allows javax.email to connect to the smtp server
     "--jvm_flag=-Dsocket.permit_connect=true",
+    '--jvm_flag=-Xmx{}m'.format(max_heap),
+    '--jvm_flag=-Djava.security.egd=file:/dev/./urandom',
     "--disable_update_check",
     "--address=" + appscale_info.get_private_ip(),
-    "--datastore_path=" + db_location,
+    "--datastore_path=" + db_proxy,
     "--login_server=" + load_balancer_host,
     "--appscale_version=1",
     "--APP_NAME=" + app_name,
     "--NGINX_ADDRESS=" + load_balancer_host,
     "--NGINX_PORT=anything",
-    os.path.dirname(locate_dir("/var/apps/" + app_name +"/app/", "WEB-INF"))
+    "--TQ_PROXY=" + tq_proxy,
+    "--pidfile={}".format(pidfile),
+    os.path.dirname(locate_dir("/var/apps/" + app_name + "/app/", "WEB-INF"))
   ]
 
   return ' '.join(cmd)
@@ -756,18 +784,13 @@ def is_config_valid(config):
       return False
   return True
 
-def usage():
-  """ Prints usage of this program """
-  print "args: --help or -h for this menu"
 
 ################################
 # MAIN
 ################################
 if __name__ == "__main__":
-  for args_index in range(1, len(sys.argv)):
-    if sys.argv[args_index] in ("-h", "--help"):
-      usage()
-      sys.exit()
+  file_io.set_logging_format()
+  deployment_config = DeploymentConfig(appscale_info.get_zk_locations_string())
 
   INTERNAL_IP = appscale_info.get_private_ip()
   SERVER = SOAPpy.SOAPServer((INTERNAL_IP, constants.APP_MANAGER_PORT))
@@ -775,9 +798,6 @@ if __name__ == "__main__":
   SERVER.registerFunction(start_app)
   SERVER.registerFunction(stop_app)
   SERVER.registerFunction(stop_app_instance)
-  SERVER.registerFunction(restart_app_instances_for_app)
-
-  file_io.set_logging_format()
 
   while 1:
     try:

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -10,18 +11,20 @@ import unittest
 import urllib2
 from xml.etree import ElementTree
 
+from appscale.common import (
+  file_io,
+  appscale_info,
+  misc,
+  monit_interface,
+  testing
+)
 from flexmock import flexmock
+
+from appscale.common import monit_app_configuration
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 import app_manager_server
-import monit_app_configuration
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../../lib"))
-import file_io
-import appscale_info
-import misc
-import monit_interface
-import testing
 
 class TestAppManager(unittest.TestCase):
   def test_bad_convert_config_from_json(self):
@@ -36,9 +39,8 @@ class TestAppManager(unittest.TestCase):
       'app_name': 'test',
       'app_port': 2000,
       'language': 'python27',
-      'load_balancer_ip': '127.0.0.1',
+      'login_ip': '127.0.0.1',
       'load_balancer_port': 8080,
-      'xmpp_ip': '127.0.0.1',
       'dblocations': ['127.0.0.1', '127.0.0.2'],
       'env_vars': {},
       'max_memory': 500
@@ -64,9 +66,8 @@ class TestAppManager(unittest.TestCase):
       'app_name': 'badName!@#$%^&*([]/.,',
       'app_port': 2000,
       'language': 'python27',
-      'load_balancer_ip': '127.0.0.1',
+      'login_ip': '127.0.0.1',
       'load_balancer_port': 8080,
-      'xmpp_ip': '127.0.0.1',
       'dblocations': ['127.0.0.1', '127.0.0.2'],
       'env_vars': {},
       'max_memory': 500
@@ -79,15 +80,18 @@ class TestAppManager(unittest.TestCase):
       'app_name': 'test',
       'app_port': 2000,
       'language': 'python27',
-      'load_balancer_ip': '127.0.0.1',
+      'login_ip': '127.0.0.1',
       'load_balancer_port': 8080,
-      'xmpp_ip': '127.0.0.1',
       'dblocations': ['127.0.0.1', '127.0.0.2'],
       'env_vars': {},
       'max_memory': 500
     }
     configuration = json.dumps(configuration)
 
+    flexmock(appscale_info).should_receive('get_db_proxy').\
+      and_return('<private_ip>')
+    flexmock(appscale_info).should_receive('get_tq_proxy').\
+      and_return('<private_ip>')
     flexmock(appscale_info).should_receive('get_private_ip').\
       and_return('<private_ip>')
     flexmock(monit_app_configuration).should_receive('create_config_file').\
@@ -110,15 +114,18 @@ class TestAppManager(unittest.TestCase):
       'app_name': 'test',
       'app_port': 2000,
       'language': 'java',
-      'load_balancer_ip': '127.0.0.1',
+      'login_ip': '127.0.0.1',
       'load_balancer_port': 8080,
-      'xmpp_ip': '127.0.0.1',
       'dblocations': ['127.0.0.1', '127.0.0.2'],
       'env_vars': {},
       'max_memory': 500
     }
     configuration = json.dumps(configuration)
 
+    flexmock(appscale_info).should_receive('get_db_proxy').\
+      and_return('<private_ip>')
+    flexmock(appscale_info).should_receive('get_tq_proxy').\
+      and_return('<private_ip>')
     flexmock(appscale_info).should_receive('get_private_ip').\
       and_return('<private_ip>')
     flexmock(monit_app_configuration).should_receive('create_config_file').\
@@ -138,6 +145,7 @@ class TestAppManager(unittest.TestCase):
     flexmock(threading).should_receive('Thread').\
       and_return(flexmock(start=lambda: None))
     flexmock(app_manager_server).should_receive("setup_logrotate").and_return()
+    flexmock(os).should_receive('listdir').and_return([])
     self.assertEqual(0, app_manager_server.start_app(configuration))
 
   def test_start_app_failed_copy_java(self):
@@ -145,9 +153,8 @@ class TestAppManager(unittest.TestCase):
       'app_name': 'test',
       'app_port': 2000,
       'language': 'java',
-      'load_balancer_ip': '127.0.0.1',
+      'login_ip': '127.0.0.1',
       'load_balancer_port': 8080,
-      'xmpp_ip': '127.0.0.1',
       'dblocations': ['127.0.0.1', '127.0.0.2'],
       'max_memory': 500
     }
@@ -218,6 +225,7 @@ class TestAppManager(unittest.TestCase):
     assert app_manager_server.extract_env_vars_from_xml('/file.xml') == {}
 
   def test_create_java_app_env(self):
+    app_manager_server.deployment_config = flexmock(get_config=lambda x: {})
     app_name = 'foo'
     flexmock(app_manager_server).should_receive('find_web_xml').and_return()
     flexmock(app_manager_server).should_receive('extract_env_vars_from_xml').\
@@ -226,12 +234,19 @@ class TestAppManager(unittest.TestCase):
     assert 'appscale' in env_vars['APPSCALE_HOME']
 
   def test_create_java_start_cmd(self): 
+    flexmock(appscale_info).should_receive('get_db_proxy').\
+      and_return('<private_ip>')
+    flexmock(appscale_info).should_receive('get_tq_proxy').\
+      and_return('<private_ip>')
     flexmock(appscale_info).should_receive('get_private_ip').\
       and_return('<private_ip>')
     flexmock(app_manager_server).should_receive('locate_dir').\
       and_return('/path/to/dir/')
     app_id = 'testapp'
-    cmd = app_manager_server.create_java_start_cmd(app_id, '20000', '127.0.0.2')
+    max_heap = 260
+    pidfile = 'testpid'
+    cmd = app_manager_server.create_java_start_cmd(
+      app_id, '20000', '127.0.0.2', max_heap, pidfile)
     assert app_id in cmd
 
   def test_create_java_stop_cmd(self): 
@@ -253,19 +268,12 @@ class TestAppManager(unittest.TestCase):
     self.assertFalse(app_manager_server.stop_app_instance(app_id, port))
 
     flexmock(misc).should_receive('is_app_name_valid').and_return(True)
-    flexmock(app_manager_server).should_receive('remove_routing')
     flexmock(monit_interface).should_receive('stop').and_return(False)
     self.assertFalse(app_manager_server.stop_app_instance(app_id, port))
 
     flexmock(monit_interface).should_receive('stop').and_return(True)
     flexmock(os).should_receive('remove')
     self.assertTrue(app_manager_server.stop_app_instance(app_id, port))
-
-  def test_restart_app_instances_for_app(self):
-    flexmock(subprocess).should_receive('call').\
-      and_return(0)
-    actual = app_manager_server.restart_app_instances_for_app('test', 'python')
-    self.assertEquals(True, actual)
 
   def test_stop_app(self):
     flexmock(monit_interface).should_receive('stop').\
@@ -297,13 +305,15 @@ class TestAppManager(unittest.TestCase):
     flexmock(subprocess).should_receive('call').and_return(0)
     flexmock(app_manager_server).should_receive('locate_dir').\
       and_return('/path/to/dir/')
+    flexmock(shutil).should_receive('copy').and_return()
     self.assertEqual(True, app_manager_server.copy_modified_jars(app_name))  
   
   def test_copy_modified_jars_fail_case_1(self):
     app_name = 'test'
-    flexmock(subprocess).should_receive('call').and_return(0).and_return(1)
+    flexmock(subprocess).should_receive('call').and_return(0)
     flexmock(app_manager_server).should_receive('locate_dir').\
       and_return('/path/to/dir/')
+    flexmock(shutil).should_receive('copy').and_raise(IOError)
     self.assertEqual(False, app_manager_server.copy_modified_jars(app_name))
 
   def test_copy_modified_jars_fail_case_2(self):

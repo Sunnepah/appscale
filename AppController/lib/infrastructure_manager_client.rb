@@ -67,13 +67,14 @@ class InfrastructureManagerClient
     @conn.add_method("get_memory_usage", "secret")
     @conn.add_method("get_service_summary", "secret")
     @conn.add_method("get_swap_usage", "secret")
+    @conn.add_method("get_loadavg", "secret")
   end
   
 
   # Check the comments in AppController/lib/app_controller_client.rb.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -117,14 +118,21 @@ class InfrastructureManagerClient
         'EC2_SECRET_KEY' => options['ec2_secret_key'],
         'EC2_URL' => options['ec2_url']
       },
-      'project' => options['project'],  # GCE-specific
+      "project" => options['project'],  # GCE-specific
       "group" => options['group'],
       "image_id" => options['machine'],
       "infrastructure" => options['infrastructure'],
       "instance_type" => options['instance_type'],
       "keyname" => options['keyname'],
       "use_spot_instances" => options['use_spot_instances'],
-      "max_spot_price" => options['max_spot_price']
+      "max_spot_price" => options['max_spot_price'],
+      "azure_subscription_id" => options['azure_subscription_id'],
+      "azure_app_id" => options['azure_app_id'],
+      "azure_app_secret_key" => options['azure_app_secret_key'],
+      "azure_tenant_id" => options['azure_tenant_id'],
+      "azure_resource_group" => options['azure_resource_group'],
+      "azure_group_tag" => options['azure_group_tag'],
+      "azure_storage_account" => options['azure_storage_account'],
     }
   end
 
@@ -159,6 +167,9 @@ class InfrastructureManagerClient
     end
     parameters['instance_ids'] = instance_ids
     parameters['region'] = options['region']
+    parameters['IS_VERBOSE'] = options['verbose']
+    parameters['zone'] = options['zone']
+    parameters['autoscale_agent'] = true
 
     terminate_result = make_call(NO_TIMEOUT, RETRY_ON_FAIL,
       "terminate_instances") {
@@ -168,12 +179,27 @@ class InfrastructureManagerClient
   end
  
   
-  def spawn_vms(num_vms, options, job, disks)
+  # Create new VMs.
+  #
+  # Args:
+  #   num_vms: the number of VMs to create.
+  #   options: a hash containing information needed by the agent
+  #     (credentials etc ...).
+  #   jobs: an Array containing the roles for each VM to be created.
+  #   disks: an Array specifying the disks to be associated with the VMs
+  #     (if any, it can be nil).
+  #
+  # Returns
+  #   An Array containing the nodes information, suitable to be converted
+  #   into Node. 
+  def spawn_vms(num_vms, options, jobs, disks)
     parameters = get_parameters_from_credentials(options)
     parameters['num_vms'] = num_vms.to_s
     parameters['cloud'] = 'cloud1'
     parameters['zone'] = options['zone']
     parameters['region'] = options['region']
+    parameters['autoscale_agent'] = true
+    parameters['IS_VERBOSE'] = options['verbose']
 
     run_result = run_instances(parameters)
     Djinn.log_debug("[IM] Run instances info says [#{run_result}]")
@@ -194,15 +220,6 @@ class InfrastructureManagerClient
       Kernel.sleep(10)
     }
 
-    # now, turn this info back into the format we normally use
-    jobs = []
-    if job.is_a?(String)
-      # We only got one job, so just repeat it for each one of the nodes
-      jobs = Array.new(size=vm_info['public_ips'].length, obj=job)
-    else
-      jobs = job
-    end
-    
     # ip:job:instance-id
     instances_created = []
     vm_info['public_ips'].each_index { |index|
@@ -271,16 +288,20 @@ class InfrastructureManagerClient
     swap_usage = JSON.parse(@conn.get_swap_usage(@secret))
     Djinn.log_debug("Swap usage: #{swap_usage}")
 
+    loadavg = JSON.parse(@conn.get_loadavg(@secret))
+    Djinn.log_debug("Loadavg: #{loadavg}")
+
     all_stats = cpu_usage
     all_stats = all_stats.merge(disk_usage)
     all_stats = all_stats.merge(memory_usage)
     all_stats = all_stats.merge(swap_usage)
+    all_stats = all_stats.merge(loadavg)
 
     # Service summary is a flat dictionary, while the rest contain nested
     # dictionaries.
     all_stats["services"] = service_summary
 
-    return all_stats
+    return JSON.dump(all_stats)
   end
 
 

@@ -4,8 +4,6 @@ require 'djinn'
 # The location on the local filesystem where we should store ZooKeeper data.
 DATA_LOCATION = "/opt/appscale/zookeeper"
 
-ZOOKEEPER_PORT="2181"
-
 # The path in ZooKeeper where the deployment ID is stored.
 DEPLOYMENT_ID_PATH = '/appscale/deployment_id'
 
@@ -18,7 +16,7 @@ syncLimit=5
 dataDir=#{DATA_LOCATION}
 clientPort=2181
 leaderServes=yes
-maxClientsCnxns=0
+maxClientCnxns=0
 forceSync=no
 skipACL=yes
 autopurge.snapRetainCount=5
@@ -57,18 +55,21 @@ EOF
 end
 
 def start_zookeeper(clear_datastore)
+  Djinn.log_info("Starting zookeeper.")
+
   if clear_datastore
+    Djinn.log_info("Removing old zookeeper state.")
     Djinn.log_run("rm -rfv /var/lib/zookeeper")
     Djinn.log_run("rm -rfv #{DATA_LOCATION}")
   end
 
   # Detect which version of zookeeper script we have.
   zk_server="zookeeper-server"
-  if system("service --status-all|grep zookeeper$")
+  if system("service --status-all 2> /dev/null | grep zookeeper$ > /dev/null")
     zk_server="zookeeper"
   end
 
-  if !File.directory?("#{DATA_LOCATION}")
+  unless File.directory?("#{DATA_LOCATION}")
     Djinn.log_info("Initializing ZooKeeper.")
     # Let's stop zookeeper in case it is still running.
     system("/usr/sbin/service #{zk_server} stop")
@@ -79,7 +80,7 @@ def start_zookeeper(clear_datastore)
 
     # Only precise (and zookeeper-server) has an init function.
     if zk_server == "zookeeper-server"
-      if not system("/usr/sbin/service #{zk_server} init")
+      unless system("/usr/sbin/service #{zk_server} init")
         Djinn.log_error("Failed to start zookeeper!")
         raise Exception FailedZooKeeperOperationException.new("Failed to" +
           " start zookeeper!")
@@ -90,11 +91,11 @@ def start_zookeeper(clear_datastore)
   # myid is needed for multi node configuration.
   Djinn.log_run("ln -sfv /etc/zookeeper/conf/myid #{DATA_LOCATION}/myid")
 
-  start_cmd = "/usr/sbin/service #{zk_server} start"
-  stop_cmd = "/usr/sbin/service #{zk_server} stop"
+  service = `which service`.chomp
+  start_cmd = "#{service} #{zk_server} start"
+  stop_cmd = "#{service} #{zk_server} stop"
   match_cmd = "org.apache.zookeeper.server.quorum.QuorumPeerMain"
-  MonitInterface.start(:zookeeper, start_cmd, stop_cmd, ports=ZOOKEEPER_PORT, env_vars=nil,
-    match_cmd=match_cmd)
+  MonitInterface.start_custom(:zookeeper, start_cmd, stop_cmd, match_cmd)
 end
 
 def is_zookeeper_running?

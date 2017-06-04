@@ -8,27 +8,25 @@ import subprocess
 import sys
 import time
 
+from appscale.datastore import appscale_datastore_batch
+from appscale.datastore import dbconstants
+from appscale.datastore.dbconstants import APP_ENTITY_SCHEMA
+from appscale.datastore.dbconstants import APP_ENTITY_TABLE
+from appscale.datastore.dbconstants import ID_KEY_LENGTH
+from appscale.datastore.dbconstants import TOMBSTONE
+from appscale.datastore.cassandra_env import cassandra_interface
+from appscale.datastore.zkappscale import zktransaction as zk
+from appscale.datastore.zkappscale.zktransaction import ZK_SERVER_CMD_LOCATIONS
+from appscale.datastore.zkappscale.zktransaction import ZKInternalException
 from cassandra.query import ConsistencyLevel
 from cassandra.query import SimpleStatement
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../lib'))
-import appscale_info
-from constants import APPSCALE_HOME
-from constants import CONTROLLER_SERVICE
-from constants import LOG_DIR
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '../AppDB'))
-import appscale_datastore_batch
-import datastore_server
-import dbconstants
-
-from cassandra_env import cassandra_interface
-from datastore_server import ID_KEY_LENGTH
-from dbconstants import APP_ENTITY_SCHEMA
-from dbconstants import APP_ENTITY_TABLE
-from zkappscale import zktransaction as zk
-from zkappscale.zktransaction import ZK_SERVER_CMD
-from zkappscale.zktransaction import ZKInternalException
+from appscale.common import appscale_info
+from appscale.common.constants import (
+  APPSCALE_HOME,
+  CONTROLLER_SERVICE,
+  LOG_DIR
+)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../InfrastructureManager"))
 from utils import utils
@@ -80,19 +78,22 @@ def ensure_app_is_not_running():
     sys.exit(1)
 
 
-def start_cassandra(db_ips, db_master, keyname):
+def start_cassandra(db_ips, db_master, keyname, zookeeper_ips):
   """ Creates a monit configuration file and prompts Monit to start Cassandra.
   Args:
     db_ips: A list of database node IPs to start Cassandra on.
     db_master: The IP address of the DB master.
     keyname: A string containing the deployment's keyname.
+    zookeeper_ips: The IP addresses of the Zookeeper nodes.
   Raises:
     AppScaleDBError if unable to start Cassandra.
   """
   logging.info("Starting Cassandra...")
   for ip in db_ips:
-    init_config = '{script} --local-ip {ip} --master-ip {db_master}'.format(
-      script=SETUP_CASSANDRA_SCRIPT, ip=ip, db_master=db_master)
+    init_config = '{script} --local-ip {ip} --master-ip {db_master} ' \
+                  '--zk-locations {zk_locations}'.format(
+                  script=SETUP_CASSANDRA_SCRIPT, ip=ip, db_master=db_master,
+                  zk_locations=get_zk_locations_string(zookeeper_ips))
     try:
       utils.ssh(ip, keyname, init_config)
     except subprocess.CalledProcessError:
@@ -134,7 +135,15 @@ def start_zookeeper(zk_ips, keyname):
       raise ZKInternalException(message)
 
   logging.info('Waiting for ZooKeeper to be ready')
-  status_cmd = '{} status'.format(ZK_SERVER_CMD)
+  zk_server_cmd = None
+  for script in ZK_SERVER_CMD_LOCATIONS:
+    if os.path.isfile(script):
+      zk_server_cmd = script
+      break
+  if zk_server_cmd is None:
+    raise ZKInternalException('Unable to find zkServer.sh')
+
+  status_cmd = '{} status'.format(zk_server_cmd)
   while (utils.ssh(zk_ips[0], keyname, status_cmd,
                    method=subprocess.call) != 0):
     time.sleep(5)
@@ -181,7 +190,7 @@ def validate_and_update_entities(db_access, zookeeper, log_postfix,
     zookeeper: A reference to ZKTransaction, which communicates with
       ZooKeeper on the given host.
     log_postfix: An identifier for the status log.
-    total_entities: The total number of entities to process.
+    total_entities: A string containing an entity count or None.
   """
   last_key = ""
   entities_checked = 0
@@ -200,8 +209,10 @@ def validate_and_update_entities(db_access, zookeeper, log_postfix,
     entities_checked += len(entities)
 
     if time.time() > last_logged + LOG_PROGRESS_FREQUENCY:
-      message = 'Processed {}/{} entities'.format(entities_checked,
-                                                  total_entities)
+      progress = str(entities_checked)
+      if total_entities is not None:
+        progress += '/{}'.format(total_entities)
+      message = 'Processed {} entities'.format(progress)
       logging.info(message)
       write_to_json_file({'status': 'inProgress', 'message': message},
                          log_postfix)
@@ -281,8 +292,9 @@ def process_entity(entity, datastore, zookeeper):
   valid_entity = validate_row(app_id, entity, zookeeper, datastore)
 
   if (valid_entity is None or
-      valid_entity[key][APP_ENTITY_SCHEMA[0]] == datastore_server.TOMBSTONE):
+      valid_entity[key][APP_ENTITY_SCHEMA[0]] == TOMBSTONE):
     delete_entity_from_table(key, datastore)
+    return
 
   if valid_entity != entity:
     update_entity_in_table(key, valid_entity, datastore)
@@ -376,25 +388,50 @@ def wait_for_quorum(keyname, db_nodes, replication):
     time.sleep(1)
 
 
-def run_datastore_upgrade(db_access, zookeeper, keyname, log_postfix):
+def estimate_total_entities(session, db_master, keyname):
+  """ Estimate the total number of entities.
+
+  Args:
+    session: A cassandra-driver session.
+    db_master: A string containing the IP address of the primary DB node.
+    keyname: A string containing the deployment keyname.
+  Returns:
+    A string containing an entity count.
+  Raises:
+    AppScaleDBError if unable to get a count.
+  """
+  query = SimpleStatement(
+    'SELECT COUNT(*) FROM "{}"'.format(dbconstants.APP_ENTITY_TABLE),
+    consistency_level=ConsistencyLevel.ONE
+  )
+  try:
+    rows = session.execute(query)[0].count
+    return str(rows / len(dbconstants.APP_ENTITY_SCHEMA))
+  except dbconstants.TRANSIENT_CASSANDRA_ERRORS:
+    stats_cmd = '{nodetool} cfstats {keyspace}.{table}'.format(
+      nodetool=cassandra_interface.NODE_TOOL,
+      keyspace=cassandra_interface.KEYSPACE,
+      table=dbconstants.APP_ENTITY_TABLE)
+    stats = utils.ssh(db_master, keyname, stats_cmd,
+                      method=subprocess.check_output)
+    for line in stats.splitlines():
+      if 'Number of keys (estimate)' in line:
+        return '{} (estimate)'.format(line.split()[-1])
+  raise dbconstants.AppScaleDBError('Unable to estimate total entities.')
+
+
+def run_datastore_upgrade(db_access, zookeeper, log_postfix, total_entities):
   """ Runs the data upgrade process of fetching, validating and updating data
   within ZooKeeper & Cassandra.
   Args:
     db_access: A handler for interacting with Cassandra.
     zookeeper: A handler for interacting with ZooKeeper.
-    keyname: A string containing the deployment's keyname.
     log_postfix: An identifier for the status log.
+    total_entities: A string containing an entity count or None.
   """
   # This datastore upgrade script is to be run offline, so make sure
   # appscale is not up while running this script.
   ensure_app_is_not_running()
-
-  query = SimpleStatement(
-    'SELECT COUNT(*) FROM "{}"'.format(dbconstants.APP_ENTITY_TABLE),
-    consistency_level=ConsistencyLevel.ONE
-  )
-  results = db_access.session.execute(query)
-  total_entities = results[0].count / len(dbconstants.APP_ENTITY_SCHEMA)
 
   # Loop through entities table, fetch valid entities from journal table
   # if necessary, delete tombstoned entities and updated invalid ones.

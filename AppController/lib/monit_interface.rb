@@ -32,35 +32,80 @@ module MonitInterface
   MONIT = "/usr/bin/monit"
 
   def self.start_monit()
-    self.run_cmd("service monit start")
+    ret = system("service --status-all 2> /dev/null | grep monit | grep + > /dev/null")
+    self.run_cmd("service monit start") unless ret
+    return ret
   end
-  
-  def self.start(watch, start_cmd, stop_cmd, ports, env_vars=nil,
-    match_cmd=start_cmd, mem=nil)
 
-    ports = [ports] unless ports.class == Array
+  # Starts a basic service. The start_cmd should be designed to run in the
+  # foreground, and it should not create its own pidfile.
+  def self.start(watch, start_cmd, ports=nil, env_vars=nil, mem=nil)
+
+    reload_monit = false
+    ports = [nil] if ports.nil?
     ports.each { |port|
-      self.write_monit_config(watch, start_cmd, stop_cmd, port,
-        env_vars, match_cmd, mem)
+      # Convert symbol to string.
+      process_name = "#{watch}"
+      full_start_cmd = start_cmd
+      unless port.nil?
+        full_start_cmd += " -p #{port}"
+        process_name += "-#{port}"
+      end
+
+      new_config = self.service_config(
+        process_name, watch, full_start_cmd, env_vars, mem)
+
+      monit_file = "#{MONIT_CONFIG}/appscale-#{process_name}.cfg"
+      reload_required = self.update_config(monit_file, new_config)
+      reload_monit = true if reload_required
+
+      Djinn.log_info("Starting #{process_name} with command #{full_start_cmd}")
     }
 
+    self.run_cmd('service monit reload', true) if reload_monit
     self.run_cmd("#{MONIT} start -g #{watch}")
   end
 
-  def self.start_file(watch, path, action, hours=12)
-    contents = <<BOO
-check file #{watch} path "#{path}" every 2 cycles
+  # Starts a daemonized service. The start_cmd should be designed to start a
+  # background process, and it should create its own pidfile.
+  def self.start_daemon(watch, start_cmd, stop_cmd, pidfile)
+    config = <<CONFIG
+CHECK PROCESS #{watch} PIDFILE #{pidfile}
   group #{watch}
-  if timestamp > 12 hours then exec "#{action}"
-BOO
+  start program = "#{start_cmd}"
+  stop program = "#{stop_cmd}"
+CONFIG
+
     monit_file = "#{MONIT_CONFIG}/appscale-#{watch}.cfg"
-    HelperFunctions.write_file(monit_file, contents)
-    Djinn.log_run("service monit reload")
+    reload_required = self.update_config(monit_file, config)
+    self.run_cmd('service monit reload', true) if reload_required
+    self.run_cmd("#{MONIT} start #{watch}")
+  end
 
-    Djinn.log_info("Watching file #{path} for #{watch}" +
-      " with exec action [#{action}]")
+  # Starts a custom service. The start_cmd should be designed to start a
+  # background process, and it should not create a pidfile.
+  def self.start_custom(watch, start_cmd, stop_cmd, match_cmd)
+    config = <<CONFIG
+CHECK PROCESS #{watch} MATCHING "#{match_cmd}"
+  group #{watch}
+  start program = "#{start_cmd}"
+  stop program = "#{stop_cmd}"
+CONFIG
 
-    Djinn.log_run("#{MONIT} start -g #{watch}")
+    monit_file = "#{MONIT_CONFIG}/appscale-#{watch}.cfg"
+    reload_required = self.update_config(monit_file, config)
+    self.run_cmd('service monit reload', true) if reload_required
+    self.run_cmd("#{MONIT} start #{watch}")
+  end
+
+  def self.update_config(monit_file, config)
+    begin
+      reload_required = File.read(monit_file) != config
+    rescue Errno::ENOENT
+      reload_required = true
+    end
+    HelperFunctions.write_file(monit_file, config) if reload_required
+    return reload_required
   end
 
   def self.restart(watch)
@@ -93,7 +138,7 @@ BOO
     end
 
     # Now let's find the corresponding configuration file and remove it.
-    config = Dir::glob("#{MONIT_CONFIG}/appscale-#{watch}*")
+    config = Dir.glob("#{MONIT_CONFIG}/appscale-#{watch}*")
     if config.length > 1
       Djinn.log_info("Found multiple monit config matches for #{watch}: #{config}.")
     end
@@ -101,9 +146,7 @@ BOO
     self.run_cmd('service monit reload', true)
   end
 
-
-  def self.write_monit_config(watch, start_cmd, stop_cmd, port,
-    env_vars, match_cmd, mem)
+  def self.service_config(process_name, group, start_cmd, env_vars, mem)
 
     # Monit doesn't support environment variables in its DSL, so if the caller
     # wants environment variables passed to the app, we have to collect them and
@@ -115,48 +158,47 @@ BOO
       }
     end
 
-    logfile = "/var/log/appscale/#{watch}-#{port}.log"
-    
-    # To get monit to capture standard out and standard err from processes it
-    # monitors, we have to have bash exec it, and pipe stdout/stderr to a file.
-    # Note that we can't just do 2>&1 - monit won't capture stdout or stderr if
-    # we do this.
-    full_start_command = "/bin/bash -c '#{env_vars_str} #{start_cmd} " +
-      "1>>#{logfile} 2>>#{logfile}'"
+    # Use start-stop-daemon to handle pidfiles and start process in background.
+    start_stop_daemon = `which start-stop-daemon`.chomp
+
+    # Use bash to redirect the process's output to a log file.
+    bash = `which bash`.chomp
+    rm = `which rm`.chomp
+
+    pidfile = "/var/run/appscale/#{process_name}.pid"
+    logfile = "/var/log/appscale/#{process_name}.log"
+    bash_exec = "exec env #{env_vars_str} #{start_cmd} >> #{logfile} 2>&1"
+
+    start_args = ['--start',
+                  '--background',
+                  '--make-pidfile',
+                  '--pidfile', pidfile,
+                  '--startas', "#{bash} -- -c '#{bash_exec}'"]
+
+    stop_cmd = "#{start_stop_daemon} --stop --pidfile #{pidfile} && " +
+               "#{rm} #{pidfile}"
 
     contents = <<BOO
-check process #{watch}-#{port} matching "#{match_cmd}"
-  group #{watch}
-  start program = "#{full_start_command}"
-  stop program = "#{stop_cmd}"
+CHECK PROCESS #{process_name} PIDFILE #{pidfile}
+  group #{group}
+  start program = "#{start_stop_daemon} #{start_args.join(' ')}"
+  stop program = "#{bash} -c '#{stop_cmd}'"
 BOO
+
     # If we have a valid 'mem' option, set the max memory for this
     # process.
     begin
       max_mem = Integer(mem)
       contents += "\n  if totalmem > #{max_mem} MB for 10 cycles then restart"
-    rescue
+    rescue ArgumentError, TypeError
       # It was not an integer, ignoring it.
     end
 
-    monit_file = "#{MONIT_CONFIG}/appscale-#{watch}-#{port}.cfg"
-    changing_config = true
-    if File.file?(monit_file)
-      current_contents = File.open(monit_file).read()
-      changing_config = false if contents == current_contents
-    end
-
-    if changing_config
-      HelperFunctions.write_file(monit_file, contents)
-      self.run_cmd('service monit reload', true)
-    end
-
-    Djinn.log_info("Starting #{watch} on port #{port}" +
-      " with start command [#{start_cmd}] and stop command [#{stop_cmd}]")
+    return contents
   end
 
   def self.is_running?(watch)
-    output = self.run_cmd("#{MONIT} summary | grep #{watch} | grep Running")
+    output = self.run_cmd("#{MONIT} summary | grep #{watch} | grep -E '(Running|Initializing)'")
     return (not output == "")
   end
 
@@ -166,7 +208,7 @@ BOO
   #   A list of application:port records.
   def self.running_appengines()
     appengines = []
-    output = self.run_cmd("#{MONIT} summary | grep -E 'app___.*Running'")
+    output = self.run_cmd("#{MONIT} summary | grep -E 'app___.*(Running|Initializing)'")
     appengines_raw = output.gsub! /Process 'app___(.*)-([0-9]*).*/, '\1:\2'
     if appengines_raw
       appengines_raw.split("\n").each{ |appengine|

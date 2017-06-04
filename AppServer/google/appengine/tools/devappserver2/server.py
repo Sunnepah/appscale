@@ -17,6 +17,7 @@
 """Manage the lifecycle of runtime processes and dispatch requests to them."""
 
 
+import capnp
 import collections
 import cStringIO
 import functools
@@ -34,11 +35,12 @@ import urllib
 import urlparse
 import wsgiref.headers
 
+
 from google.appengine.api import api_base_pb
 from google.appengine.api import apiproxy_stub_map
 from google.appengine.api import appinfo
 from google.appengine.api import request_info
-from google.appengine.api.logservice import log_service_pb
+from google.appengine.api.logservice import logging_capnp
 from google.appengine.tools.devappserver2 import application_configuration
 from google.appengine.tools.devappserver2 import blob_image
 from google.appengine.tools.devappserver2 import blob_upload
@@ -62,6 +64,7 @@ from google.appengine.tools.devappserver2 import url_handler
 from google.appengine.tools.devappserver2 import util
 from google.appengine.tools.devappserver2 import wsgi_handler
 from google.appengine.tools.devappserver2 import wsgi_server
+from google.appengine.api.logservice import log_service_pb
 
 
 _LOWER_HEX_DIGITS = string.hexdigits.lower()
@@ -154,7 +157,7 @@ class Server(object):
       return go_runtime.GoRuntimeInstanceFactory(
           request_data=self._request_data,
           runtime_config_getter=self._get_runtime_config,
-          server_configuration=server_configuration)
+          module_configuration=server_configuration)
     elif server_configuration.runtime in ('python', 'python27'):
       return python_runtime.PythonRuntimeInstanceFactory(
           request_data=self._request_data,

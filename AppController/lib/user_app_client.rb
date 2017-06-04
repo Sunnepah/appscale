@@ -64,7 +64,7 @@ class UserAppClient
   # Check the comments in AppController/lib/app_controller_client.rb.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -269,6 +269,9 @@ class UserAppClient
     }
 
     app_list = all_apps.split(":")
+    if app_list[0] == "Error"
+      raise FailedNodeException.new("get_all_apps: got #{all_apps}.")
+    end
     app_list = app_list - [app_list[0]] # first item is a dummy value
     return app_list
   end
@@ -280,6 +283,9 @@ class UserAppClient
     }
 
     user_list = all_users.split(":")
+    if user_list[0] = "Error"
+      raise FailedNodeException.new("get_all_users: got #{all_users}.")
+    end
     user_list = user_list - [user_list[0]]  # first item is a dummy value
     return user_list
   end
@@ -310,13 +316,6 @@ class UserAppClient
     else
       return false
     end
-  end
-
-  # This method sees if the given app is already uploaded in the system.
-  # TODO: compare this with is_app_enabled? above
-  def is_app_uploaded?(appname)
-    all_apps = get_all_apps()
-    return app_list.include?(appname)
   end
 
   def is_user_cloud_admin?(user, retry_on_except=true)

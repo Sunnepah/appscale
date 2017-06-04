@@ -21,8 +21,8 @@ echo "APPSCALE_HOME in runtime=${APPSCALE_HOME_RUNTIME}"
 
 # Let's make sure we got at least one input.
 if [ -z "$1" ]; then
-        echo "ERROR: need to have at least one target!"
-        exit 1
+    echo "ERROR: need to have at least one target!"
+    exit 1
 fi
 
 case "$1" in
@@ -32,6 +32,7 @@ case "$1" in
         # Scratch install of appscale including post script.
         installappscaleprofile
         . /etc/profile.d/appscale.sh
+        upgradepip
         installgems
         postinstallhaproxy
         postinstallnginx
@@ -45,16 +46,17 @@ case "$1" in
         installtornado
         installpycrypto 
         installflexmock
+        installpycapnp
         installzookeeper
         postinstallzookeeper
         installcassandra
         postinstallcassandra
         postinstallrabbitmq
-        installcelery
         installsolr
         installservice
         postinstallservice
         postinstallmonit
+        postinstallejabberd
         sethosts
         setulimits
         increaseconnections
@@ -64,6 +66,14 @@ case "$1" in
         postinstallrsyslog
         installpsutil
         installapiclient
-        buildgo
+        installgosdk
+        installcommon
+        installadminserver
+        installhermes
+        installtaskqueue
+        installdatastore
+        preplogserver
+        prepdashboard
+        fetchclientjars
         ;;
 esac

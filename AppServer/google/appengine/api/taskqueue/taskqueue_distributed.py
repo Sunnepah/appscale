@@ -75,15 +75,17 @@ CERT_LOCATION = "/etc/appscale/certs/mycert.pem"
 # The location the SSL private key is placed for encrypted communication.
 KEY_LOCATION = "/etc/appscale/certs/mykey.pem"
 
-TASKQUEUE_LOCATION_FILE = "/etc/appscale/rabbitmq_ip"
-TASKQUEUE_SERVER_PORT = 64839
+TASKQUEUE_PROXY_FILE = "/etc/appscale/load_balancer_ips"
+TASKQUEUE_SERVER_PORT = 17446
 
 class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
   """Python only task queue service stub.
 
   This stub executes tasks when enabled by using the dev_appserver's AddEvent
-  capability. 
+  capability.
   """
+  _ACCEPTS_REQUEST_ID = True
+
   def __init__(self, app_id, host, port, service_name='taskqueue'):
     """Constructor.
 
@@ -98,24 +100,28 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     self.__app_id = app_id
     self.__nginx_host = host
     self.__nginx_port = port
-    self.__tq_location = self.__GetTQLocation()
 
-  def __GetTQLocation(self):
-    """ Gets the nearest AppScale TaskQueue server. """
-    if os.path.exists(TASKQUEUE_LOCATION_FILE):
-      tq_file = open(TASKQUEUE_LOCATION_FILE)
-      location = tq_file.read() 
-      tq_file.close()
+  def _GetTQLocations(self):
+    """ Gets a list of TaskQueue proxies. """
+    if os.path.exists(TASKQUEUE_PROXY_FILE):
+      try:
+        with open(TASKQUEUE_PROXY_FILE) as tq_file:
+          ips = [ip for ip in tq_file.read().split('\n') if ip]
+      except IOError:
+        raise apiproxy_errors.ApplicationError(
+          taskqueue_service_pb.TaskQueueServiceError.INTERNAL_ERROR)
     else:
-      location = "localhost"
+      raise apiproxy_errors.ApplicationError(
+        taskqueue_service_pb.TaskQueueServiceError.INTERNAL_ERROR)
 
-    location += ":" + str(TASKQUEUE_SERVER_PORT)
-    return location
+    locations = ["{ip}:{port}".format(ip=ip, port=TASKQUEUE_SERVER_PORT)
+                 for ip in ips]
+    return locations
 
   def _ChooseTaskName(self, app_name, queue_name, user_chosen=None):
     """ Creates a task name that the system can use to address
         tasks from different apps and queues.
- 
+
     Args:
       app_name: The application name.
       queue_name: A str representing the queue name that the task goes in.
@@ -132,7 +138,7 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
 
   def _AddTransactionalBulkTask(self, request, response):
     """ Add a transactional task.
-  
+
     Args:
       request: A taskqueue_service_pb.TaskQueueAddRequest.
       response: A taskqueue_service_pb.TaskQueueAddResponse.
@@ -153,7 +159,7 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     for add_request, task_result in zip(request.add_request_list(),
                                         response.taskresult_list()):
       task_result.set_result(taskqueue_service_pb.TaskQueueServiceError.OK)
- 
+
     # All task should have been validated and assigned a unique name by this point.
     try:
       apiproxy_stub_map.MakeSyncCall(
@@ -163,10 +169,10 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
           e.application_error +
           taskqueue_service_pb.TaskQueueServiceError.DATASTORE_ERROR,
           e.error_detail)
- 
+
     return response
 
-  def _Dynamic_Add(self, request, response):
+  def _Dynamic_Add(self, request, response, request_id=None):
     """Add a single task to a queue.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -177,12 +183,13 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
           taskqueue_service.proto.
       response: The taskqueue_service_pb.TaskQueueAddResponse. See
           taskqueue_service.proto.
+      request_id: A string specifying the request ID.
     """
     bulk_request = taskqueue_service_pb.TaskQueueBulkAddRequest()
     bulk_response = taskqueue_service_pb.TaskQueueBulkAddResponse()
 
     bulk_request.add_add_request().CopyFrom(request)
-    self._Dynamic_BulkAdd(bulk_request, bulk_response)
+    self._Dynamic_BulkAdd(bulk_request, bulk_response, request_id)
 
     assert bulk_response.taskresult_size() == 1
     result = bulk_response.taskresult(0).result()
@@ -193,7 +200,7 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
       response.set_chosen_task_name(
           bulk_response.taskresult(0).chosen_task_name())
 
-  def _Dynamic_BulkAdd(self, request, response):
+  def _Dynamic_BulkAdd(self, request, response, request_id=None):
     """Add many tasks to a queue using a single request.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -204,6 +211,7 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
           taskqueue_service.proto.
       response: The taskqueue_service_pb.TaskQueueBulkAddResponse. See
           taskqueue_service.proto.
+      request_id: A string specifying the request ID.
     Returns:
       The response object.
     """
@@ -219,10 +227,10 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
       url = "http://" + self.__nginx_host + ":" + str(self.__nginx_port) + url
       add_request.set_url(url)
 
-    self._RemoteSend(request, response, "BulkAdd")
+    self._RemoteSend(request, response, "BulkAdd", request_id)
     return response
 
-  def _Dynamic_UpdateQueue(self, request, unused_response):
+  def _Dynamic_UpdateQueue(self, request, unused_response, request_id=None):
     """Local implementation of the UpdateQueue RPC in TaskQueueService.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -232,11 +240,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
       request: A taskqueue_service_pb.TaskQueueUpdateQueueRequest.
       unused_response: A taskqueue_service_pb.TaskQueueUpdateQueueResponse.
                        Not used.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, unused_response, "UpdateQueue")
+    self._RemoteSend(request, unused_response, "UpdateQueue", request_id)
     return unused_response
 
-  def _Dynamic_FetchQueues(self, request, response):
+  def _Dynamic_FetchQueues(self, request, response, request_id=None):
     """Local implementation of the FetchQueues RPC in TaskQueueService.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -245,11 +254,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueFetchQueuesRequest.
       response: A taskqueue_service_pb.TaskQueueFetchQueuesResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "FetchQueues")
+    self._RemoteSend(request, response, "FetchQueues", request_id)
     return response
 
-  def _Dynamic_FetchQueueStats(self, request, response):
+  def _Dynamic_FetchQueueStats(self, request, response, request_id=None):
     """Local 'random' implementation of the TaskQueueService.FetchQueueStats.
 
     This implementation loads some stats from the task store, the rest with
@@ -261,11 +271,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueFetchQueueStatsRequest.
       response: A taskqueue_service_pb.TaskQueueFetchQueueStatsResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "FetchQueueStats")
+    self._RemoteSend(request, response, "FetchQueueStats", request_id)
     return response
 
-  def _Dynamic_QueryTasks(self, request, response):
+  def _Dynamic_QueryTasks(self, request, response, request_id=None):
     """Local implementation of the TaskQueueService.QueryTasks RPC.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -274,11 +285,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueQueryTasksRequest.
       response: A taskqueue_service_pb.TaskQueueQueryTasksResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "QueryTasks")
+    self._RemoteSend(request, response, "QueryTasks", request_id)
     return response
 
-  def _Dynamic_FetchTask(self, request, response):
+  def _Dynamic_FetchTask(self, request, response, request_id=None):
     """Local implementation of the TaskQueueService.FetchTask RPC.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -287,11 +299,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueFetchTaskRequest.
       response: A taskqueue_service_pb.TaskQueueFetchTaskResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "FetchTask")
-    return response 
+    self._RemoteSend(request, response, "FetchTask", request_id)
+    return response
 
-  def _Dynamic_Delete(self, request, response):
+  def _Dynamic_Delete(self, request, response, request_id=None):
     """Local delete implementation of TaskQueueService.Delete.
 
     Deletes tasks from the task store. A 1/20 chance of a transient error.
@@ -302,11 +315,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueDeleteRequest.
       response: A taskqueue_service_pb.TaskQueueDeleteResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "Delete")
-    return response 
+    self._RemoteSend(request, response, "Delete", request_id)
+    return response
 
-  def _Dynamic_ForceRun(self, request, response):
+  def _Dynamic_ForceRun(self, request, response, request_id=None):
     """Local force run implementation of TaskQueueService.ForceRun.
 
     Forces running of a task in a queue. This is a no-op here.
@@ -318,11 +332,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueForceRunRequest.
       response: A taskqueue_service_pb.TaskQueueForceRunResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "ForceRun")
+    self._RemoteSend(request, response, "ForceRun", request_id)
     return response
- 
-  def _Dynamic_DeleteQueue(self, request, response):
+
+  def _Dynamic_DeleteQueue(self, request, response, request_id=None):
     """Local delete implementation of TaskQueueService.DeleteQueue.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -331,11 +346,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueDeleteQueueRequest.
       response: A taskqueue_service_pb.TaskQueueDeleteQueueResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "DeleteQueue")
+    self._RemoteSend(request, response, "DeleteQueue", request_id)
     return response
 
-  def _Dynamic_PauseQueue(self, request, response):
+  def _Dynamic_PauseQueue(self, request, response, request_id=None):
     """Remote pause implementation of TaskQueueService.PauseQueue.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -344,11 +360,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueuePauseQueueRequest.
       response: A taskqueue_service_pb.TaskQueuePauseQueueResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "PauseQueue")
+    self._RemoteSend(request, response, "PauseQueue", request_id)
     return response
 
-  def _Dynamic_PurgeQueue(self, request, response):
+  def _Dynamic_PurgeQueue(self, request, response, request_id=None):
     """Remote purge implementation of TaskQueueService.PurgeQueue.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -357,11 +374,12 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueuePurgeQueueRequest.
       response: A taskqueue_service_pb.TaskQueuePurgeQueueResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "PurgeQueue")
+    self._RemoteSend(request, response, "PurgeQueue", request_id)
     return response
 
-  def _Dynamic_DeleteGroup(self, request, response):
+  def _Dynamic_DeleteGroup(self, request, response, request_id=None):
     """Remote delete implementation of TaskQueueService.DeleteGroup.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -370,10 +388,11 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueDeleteGroupRequest.
       response: A taskqueue_service_pb.TaskQueueDeleteGroupResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "DeleteGroup")
- 
-  def _Dynamic_UpdateStorageLimit(self, request, response):
+    self._RemoteSend(request, response, "DeleteGroup", request_id)
+
+  def _Dynamic_UpdateStorageLimit(self, request, response, request_id=None):
     """Remote implementation of TaskQueueService.UpdateStorageLimit.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -382,10 +401,11 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueUpdateStorageLimitRequest.
       response: A taskqueue_service_pb.TaskQueueUpdateStorageLimitResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "UpdateStorageLimit")
+    self._RemoteSend(request, response, "UpdateStorageLimit", request_id)
 
-  def _Dynamic_QueryAndOwnTasks(self, request, response):
+  def _Dynamic_QueryAndOwnTasks(self, request, response, request_id=None):
     """Local implementation of TaskQueueService.QueryAndOwnTasks.
 
     Must adhere to the '_Dynamic_' naming convention for stubbing to work.
@@ -394,46 +414,56 @@ class TaskQueueServiceStub(apiproxy_stub.APIProxyStub):
     Args:
       request: A taskqueue_service_pb.TaskQueueQueryAndOwnTasksRequest.
       response: A taskqueue_service_pb.TaskQueueQueryAndOwnTasksResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "QueryAndOwnTasks")
+    self._RemoteSend(request, response, "QueryAndOwnTasks", request_id)
 
-  def _Dynamic_ModifyTaskLease(self, request, response):
+  def _Dynamic_ModifyTaskLease(self, request, response, request_id=None):
     """Local implementation of TaskQueueService.ModifyTaskLease.
 
     Args:
       request: A taskqueue_service_pb.TaskQueueModifyTaskLeaseRequest.
       response: A taskqueue_service_pb.TaskQueueModifyTaskLeaseResponse.
+      request_id: A string specifying the request ID.
     """
-    self._RemoteSend(request, response, "ModifyTaskLease")
+    self._RemoteSend(request, response, "ModifyTaskLease", request_id)
 
-  def _RemoteSend(self, request, response, method):
-    """Sends a request remotely to the taskqueue server. 
- 
+  def _RemoteSend(self, request, response, method, request_id=None):
+    """Sends a request remotely to the taskqueue server.
+
     Args:
       request: A protocol buffer request.
       response: A protocol buffer response.
       method: The function which is calling the remote server.
+      request_id: A string specifying a request ID.
     Raises:
-      taskqueue_service_pb.InternalError: 
+      taskqueue_service_pb.InternalError:
     """
     tag = self.__app_id
     api_request = remote_api_pb.Request()
     api_request.set_method(method)
     api_request.set_service_name("taskqueue")
     api_request.set_request(request.Encode())
+    if request_id is not None:
+      api_request.set_request_id(request_id)
 
-    api_response = remote_api_pb.Response()
-    api_response = api_request.sendCommand(self.__tq_location,
-      tag,
-      api_response,
-      1,
-      False,
-      KEY_LOCATION,
-      CERT_LOCATION)
+    tq_locations = self._GetTQLocations()
+    for index, tq_location in enumerate(tq_locations):
+      api_response = remote_api_pb.Response()
+      api_response = api_request.sendCommand(tq_location,
+        tag,
+        api_response,
+        1,
+        False,
+        KEY_LOCATION,
+        CERT_LOCATION)
 
-    if not api_response or not api_response.has_response():
-      raise apiproxy_errors.ApplicationError(
-          taskqueue_service_pb.TaskQueueServiceError.INTERNAL_ERROR)
+      if not api_response or not api_response.has_response():
+        if index >= len(tq_locations) - 1:
+          raise apiproxy_errors.ApplicationError(
+              taskqueue_service_pb.TaskQueueServiceError.INTERNAL_ERROR)
+      else:
+        break
 
     if api_response.has_application_error():
       error_pb = api_response.application_error()

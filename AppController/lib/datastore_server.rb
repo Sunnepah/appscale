@@ -20,34 +20,24 @@ module DatastoreServer
 
   # The port that we should run nginx on, to load balance requests to the
   # various DatastoreServers running on this node.
-  PROXY_PORT = 3999
-
-
-  # The port that nginx should be listening to for non-encrypted requests to
-  # the DatastoreServers.
-  LISTEN_PORT_NO_SSL = 8888
-
-
-  # The port that nginx should be listening to for encrypted requests to the
-  # DatastoreServers.
-  LISTEN_PORT_WITH_SSL = 8443
+  PROXY_PORT = 8888
 
 
   # The name that nginx should use as the identifier for the DatastoreServer when it
   # we write its configuration files.
-  NAME = "as_datastore_server"
+  NAME = "appscale-datastore_server"
 
   # If we fail to get the number of processors we set our default number of 
   # datastore servers to this value.
   DEFAULT_NUM_SERVERS = 3
 
-  # Datastore server processes to core multipler.
+  # Datastore server processes to core multiplier.
   MULTIPLIER = 2
 
   # Starts a Datastore Server on this machine. We don't want to monitor
   # it ourselves, so just tell monit to start it and watch it.
   def self.start(master_ip, db_local_ip, table, verbose=false)
-    datastore_server = self.get_executable_name(table)
+    datastore_server = self.get_executable_name
     ports = self.get_server_ports()
 
     env_vars = { 
@@ -56,14 +46,9 @@ module DatastoreServer
       "LOCAL_DB_IP" => db_local_ip 
     }
   
-    ports.each { |port|
-      start_cmd = "/usr/bin/python2 #{datastore_server} -p #{port} " +
-          "--no_encryption --type #{table}"
-      start_cmd << ' --verbose' if verbose
-      stop_cmd = "/usr/bin/python2 #{APPSCALE_HOME}/scripts/stop_service.py " +
-            "datastore_server.py #{port}"
-      MonitInterface.start(:datastore_server, start_cmd, stop_cmd, port, env_vars)
-    }
+    start_cmd = "#{datastore_server} --type #{table}"
+    start_cmd << ' --verbose' if verbose
+    MonitInterface.start(:datastore_server, start_cmd, ports, env_vars)
   end
 
 
@@ -71,15 +56,6 @@ module DatastoreServer
   # managed by monit, just tell monit to shut it down.
   def self.stop()
      MonitInterface.stop(:datastore_server)
-  end
-
-  # The following are needed to comply to the djinn calling in
-  # stop_db_master and stop_db_slave.
-  def self.stop_db_master(table)
-    MonitInterface.stop(:datastore_server)
-  end
-  def self.stop_db_slave(table)
-    MonitInterface.stop(:datastore_server)
   end
 
   # Restarts the Datastore Buffer Server on this machine by doing a hard
@@ -114,8 +90,8 @@ module DatastoreServer
 
   
   # Return the name of the executable of the datastore server.
-  def self.get_executable_name(table)
-    return "#{APPSCALE_HOME}/AppDB/datastore_server.py"
+  def self.get_executable_name
+    return `which appscale-datastore`.chomp
   end
 
   # Tell each of the datastore servers on this node to disable writes.

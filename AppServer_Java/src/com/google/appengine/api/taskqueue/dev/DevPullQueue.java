@@ -2,157 +2,169 @@ package com.google.appengine.api.taskqueue.dev;
 
 
 import java.util.ArrayList;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+
+import org.quartz.Job;
+import org.quartz.JobDetail;
+import org.quartz.JobExecutionContext;
+import org.quartz.JobExecutionException;
+import org.quartz.Scheduler;
+import org.quartz.SchedulerException;
+import org.quartz.SimpleTrigger;
+import org.quartz.Trigger;
+import org.quartz.spi.TriggerFiredBundle;
 
 import com.google.appengine.api.taskqueue.QueueConstants;
 import com.google.appengine.api.taskqueue.TaskQueuePb;
+import com.google.appengine.api.taskqueue.TaskQueuePb.TaskQueueAddRequest;
+import com.google.appengine.api.taskqueue.TaskQueuePb.TaskQueueRetryParameters;
 import com.google.appengine.tools.development.Clock;
 import com.google.apphosting.api.ApiProxy;
 import com.google.apphosting.utils.config.QueueXml;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 
 
-public class DevPullQueue extends DevQueue
-{
-    private Map<String, TaskQueuePb.TaskQueueAddRequest> taskMap                   = Collections.synchronizedMap(new HashMap<String, TaskQueuePb.TaskQueueAddRequest>());
-    private Clock                                        clock;
-    private double                                       oneSecondInMilli          = 1000;
-    private double                                       oneThousandSecondsInMilli = 1000000;
+public class DevPullQueue extends DevQueue {
+    private Map<String, TaskQueuePb.TaskQueueAddRequest> taskMap = Collections.synchronizedMap(new HashMap<String, TaskQueuePb.TaskQueueAddRequest>());
+    private Clock clock;
+    private double oneSecondInMilli = 1000;
+    private double oneThousandSecondsInMilli = 1000000;
+    private final Scheduler scheduler;
+    private final String baseUrl;
+    private final LocalTaskQueueCallback callback;
+    private AppScaleTaskQueueClient client;
 
-    TaskQueuePb.TaskQueueMode.Mode getMode()
-    {
+
+    TaskQueuePb.TaskQueueMode.Mode getMode() {
         return TaskQueuePb.TaskQueueMode.Mode.PULL;
     }
 
-    DevPullQueue( QueueXml.Entry queueXmlEntry, Clock clock )
-    {
+    DevPullQueue(QueueXml.Entry queueXmlEntry, Scheduler scheduler, String baseUrl, Clock clock, LocalTaskQueueCallback callback, AppScaleTaskQueueClient client) {
         super(queueXmlEntry);
+        this.client = client;
+        this.scheduler = scheduler;
+        this.baseUrl = baseUrl;
         this.clock = clock;
+        this.callback = callback;
     }
 
-    synchronized TaskQueuePb.TaskQueueAddResponse add( TaskQueuePb.TaskQueueAddRequest addRequest )
-    {
-        if (addRequest.getMode() != TaskQueuePb.TaskQueueMode.Mode.PULL.getValue())
-        {
+    synchronized TaskQueuePb.TaskQueueAddResponse add(TaskQueuePb.TaskQueueAddRequest addRequest) {
+        String queueName = addRequest.getQueueName();
+        if (addRequest.getMode() != TaskQueuePb.TaskQueueMode.Mode.PULL.getValue()) {
             throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.INVALID_QUEUE_MODE.getValue());
         }
-        if (!addRequest.getQueueName().equals(getQueueName()))
-        {
+        if (!addRequest.getQueueName().equals(getQueueName())) {
             throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.INVALID_REQUEST.getValue());
         }
-        String taskName;
-        if ((addRequest.hasTaskName()) && (!addRequest.getTaskName().equals("")))
-        {
-            taskName = addRequest.getTaskName();
-        }
-        else
-        {
-            taskName = genTaskName();
-        }
-        if (this.taskMap.containsKey(taskName))
-        {
-            throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.TASK_ALREADY_EXISTS.getValue());
-        }
-        this.taskMap.put(taskName, addRequest);
 
-        TaskQueuePb.TaskQueueAddResponse addResponse = new TaskQueuePb.TaskQueueAddResponse();
-        if ((!addRequest.hasTaskName()) || (addRequest.getTaskName().equals("")))
-        {
-            addRequest.setTaskName(taskName);
-            addResponse.setChosenTaskName(taskName);
-        }
-
+        /*
+         * AppScale - sending task to RabbitMQ instead of calling scheduleTask method
+         */
+        logger.log(Level.FINE, "PullQueue: sending AddRequest to TaskQueue server for " + queueName);
+        TaskQueuePb.TaskQueueAddResponse addResponse = client.add(addRequest);
         return addResponse;
     }
 
-    boolean deleteTask( String taskName )
-    {
-        return this.taskMap.remove(taskName) != null;
+    synchronized TaskQueuePb.TaskQueueDeleteResponse deleteTask(TaskQueuePb.TaskQueueDeleteRequest deleteRequest) {
+        String queueName = deleteRequest.getQueueName();
+        if (!queueName.equals(getQueueName())) {
+            throw new ApiProxy.ApplicationException(
+                    TaskQueuePb.TaskQueueServiceError.ErrorCode.INVALID_REQUEST.getValue());
+        }
+
+        logger.log(Level.FINE, "PullQueue: Sending DeleteRequest to TaskQueue server for " + queueName);
+        TaskQueuePb.TaskQueueDeleteResponse deleteResponse = client.delete(deleteRequest);
+
+        return deleteResponse;
     }
 
-    void flush()
-    {
-        this.taskMap.clear();
+    // Abstract method needs to be overriden here.
+    boolean deleteTask(String taskName) {
+        throw new ApiProxy.ApplicationException(
+            TaskQueuePb.TaskQueueServiceError.ErrorCode.INTERNAL_ERROR.getValue(),
+            "Not implemented");
     }
 
-    QueueStateInfo getStateInfo()
-    {
+    synchronized TaskQueuePb.TaskQueuePurgeQueueResponse purge(TaskQueuePb.TaskQueuePurgeQueueRequest purgeRequest) {
+        String queueName = purgeRequest.getQueueName();
+        if (!queueName.equals(getQueueName())) {
+            throw new ApiProxy.ApplicationException(
+                    TaskQueuePb.TaskQueueServiceError.ErrorCode.INVALID_REQUEST.getValue());
+        }
+
+        logger.log(Level.FINE, "PullQueue: Sending PurgeQueueRequest to TaskQueue server for " + queueName);
+        TaskQueuePb.TaskQueuePurgeQueueResponse purgeResponse = client.purge(purgeRequest);
+
+        return purgeResponse;
+    }
+
+    QueueStateInfo getStateInfo() {
         ArrayList<QueueStateInfo.TaskStateInfo> taskInfoList = new ArrayList<QueueStateInfo.TaskStateInfo>();
 
-        for (String taskName : getSortedTaskNames())
-        {
-            TaskQueuePb.TaskQueueAddRequest addRequest = (TaskQueuePb.TaskQueueAddRequest)this.taskMap.get(taskName);
-            if (addRequest == null)
-            {
+        for (String taskName : getSortedTaskNames()) {
+            TaskQueuePb.TaskQueueAddRequest addRequest = (TaskQueuePb.TaskQueueAddRequest) this.taskMap.get(taskName);
+            if (addRequest == null) {
                 continue;
             }
             long etaMillis = addRequest.getEtaUsec() / 1000L;
             taskInfoList.add(new QueueStateInfo.TaskStateInfo(taskName, etaMillis, addRequest, this.clock));
         }
 
-        Collections.sort(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>()
-        {
-            public int compare( QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2 )
-            {
+        Collections.sort(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>() {
+            public int compare(QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2) {
                 return Long.valueOf(t1.getEtaMillis()).compareTo(Long.valueOf(t2.getEtaMillis()));
             }
         });
         return new QueueStateInfo(this.queueXmlEntry, taskInfoList);
     }
 
-    QueueStateInfo getStateInfoByTag( byte[] tag )
-    {
+    QueueStateInfo getStateInfoByTag(byte[] tag) {
         ArrayList<QueueStateInfo.TaskStateInfo> taskInfoList = new ArrayList<QueueStateInfo.TaskStateInfo>();
 
-        for (String taskName : getSortedTaskNames())
-        {
-            TaskQueuePb.TaskQueueAddRequest addRequest = (TaskQueuePb.TaskQueueAddRequest)this.taskMap.get(taskName);
-            if (addRequest == null)
-            {
+        for (String taskName : getSortedTaskNames()) {
+            TaskQueuePb.TaskQueueAddRequest addRequest = (TaskQueuePb.TaskQueueAddRequest) this.taskMap.get(taskName);
+            if (addRequest == null) {
                 continue;
             }
             long etaMillis = addRequest.getEtaUsec() / 1000L;
             taskInfoList.add(new QueueStateInfo.TaskStateInfo(taskName, etaMillis, addRequest, this.clock));
         }
-        if (tag == null)
-        {
-            QueueStateInfo.TaskStateInfo firstTask = (QueueStateInfo.TaskStateInfo)Collections.min(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>()
-            {
-                public int compare( QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2 )
-                {
+        if (tag == null) {
+            QueueStateInfo.TaskStateInfo firstTask = (QueueStateInfo.TaskStateInfo) Collections.min(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>() {
+                public int compare(QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2) {
                     return Long.valueOf(t1.getEtaMillis()).compareTo(Long.valueOf(t2.getEtaMillis()));
                 }
             });
-            if (firstTask != null)
-            {
+            if (firstTask != null) {
                 tag = firstTask.getTagAsBytes();
             }
         }
-        final byte[] chosenTag = tag == null ? null : (byte[])tag.clone();
+        final byte[] chosenTag = tag == null ? null : (byte[]) tag.clone();
 
-        Collections.sort(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>()
-        {
-            public int compare( QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2 )
-            {
+        Collections.sort(taskInfoList, new Comparator<QueueStateInfo.TaskStateInfo>() {
+            public int compare(QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2) {
                 byte[] tag1 = t1.getTagAsBytes();
                 byte[] tag2 = t2.getTagAsBytes();
-                if (Arrays.equals(tag1, tag2))
-                {
+                if (Arrays.equals(tag1, tag2)) {
                     return Long.valueOf(t1.getEtaMillis()).compareTo(Long.valueOf(t2.getEtaMillis()));
                 }
 
-                if (Arrays.equals(tag1, chosenTag))
-                {
+                if (Arrays.equals(tag1, chosenTag)) {
                     return -1;
                 }
-                if (Arrays.equals(tag2, chosenTag))
-                {
+                if (Arrays.equals(tag2, chosenTag)) {
                     return 1;
                 }
 
@@ -160,8 +172,7 @@ public class DevPullQueue extends DevQueue
             }
         });
         ArrayList<QueueStateInfo.TaskStateInfo> taggedTaskInfoList = new ArrayList<QueueStateInfo.TaskStateInfo>();
-        for (QueueStateInfo.TaskStateInfo t : taskInfoList)
-        {
+        for (QueueStateInfo.TaskStateInfo t : taskInfoList) {
             byte[] taskTag = t.getTagAsBytes();
             if (!Arrays.equals(taskTag, chosenTag)) break;
             taggedTaskInfoList.add(t);
@@ -170,98 +181,58 @@ public class DevPullQueue extends DevQueue
         return new QueueStateInfo(this.queueXmlEntry, taggedTaskInfoList);
     }
 
-    List<String> getSortedTaskNames()
-    {
+    List<String> getSortedTaskNames() {
         List<String> taskNameList = new ArrayList<String>(this.taskMap.keySet());
         Collections.sort(taskNameList);
         return taskNameList;
     }
 
-    boolean runTask( String taskName )
-    {
+    boolean runTask(String taskName) {
         return false;
     }
 
-    long currentTimeMillis()
-    {
-        if (this.clock != null)
-        {
+    long currentTimeMillis() {
+        if (this.clock != null) {
             return this.clock.getCurrentTime();
         }
         return System.currentTimeMillis();
     }
 
-    int availableTaskCount( List<QueueStateInfo.TaskStateInfo> tasks, long nowMillis )
-    {
-        int index = Collections.binarySearch(tasks, new QueueStateInfo.TaskStateInfo(null, nowMillis, null, null), new Comparator<QueueStateInfo.TaskStateInfo>()
-        {
-            public int compare( QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2 )
-            {
+    int availableTaskCount(List<QueueStateInfo.TaskStateInfo> tasks, long nowMillis) {
+        int index = Collections.binarySearch(tasks, new QueueStateInfo.TaskStateInfo(null, nowMillis, null, null), new Comparator<QueueStateInfo.TaskStateInfo>() {
+            public int compare(QueueStateInfo.TaskStateInfo t1, QueueStateInfo.TaskStateInfo t2) {
                 return Long.valueOf(t1.getEtaMillis()).compareTo(Long.valueOf(t2.getEtaMillis()));
             }
         });
-        if (index < 0)
-        {
+        if (index < 0) {
             index = -index - 1;
         }
         return index;
     }
 
-    synchronized List<TaskQueuePb.TaskQueueAddRequest> queryAndOwnTasks( double leaseSeconds, long maxTasks, boolean groupByTag, byte[] tag )
-    {
-        if ((leaseSeconds < 0.0D) || (leaseSeconds > QueueConstants.maxLease(TimeUnit.SECONDS)))
-        {
+    synchronized TaskQueuePb.TaskQueueQueryAndOwnTasksResponse queryAndOwnTasks(TaskQueuePb.TaskQueueQueryAndOwnTasksRequest request) {
+        double leaseSeconds = request.getLeaseSeconds();
+        long maxTasks = request.getMaxTasks();
+        boolean groupByTag = request.isGroupByTag();
+        byte[] tag = request.getTagAsBytes();
+        String logMessage = "DevPullQueue.queryAndOwnTasks: " + "queue=" + request.getQueueName() +
+                            " | leaseSeconds=" + leaseSeconds + " | maxTasks=" + maxTasks;
+        logger.log(Level.FINE, logMessage);
+
+        if ((leaseSeconds < 0.0D) || (leaseSeconds > QueueConstants.maxLease(TimeUnit.SECONDS))) {
             throw new IllegalArgumentException("Invalid value for lease time.");
         }
-        if ((maxTasks <= 0L) || (maxTasks > QueueConstants.maxLeaseCount()))
-        {
+        if ((maxTasks <= 0L) || (maxTasks > QueueConstants.maxLeaseCount())) {
             throw new IllegalArgumentException("Invalid value for lease count.");
         }
 
-        List<QueueStateInfo.TaskStateInfo> tasks = groupByTag ? getStateInfoByTag(tag).getTaskInfo() : getStateInfo().getTaskInfo();
-
-        long nowMillis = currentTimeMillis();
-        int available = availableTaskCount(tasks, nowMillis);
-        int resultSize = (int)Math.min(tasks.size(), Math.min(available, maxTasks));
-        tasks = tasks.subList(0, resultSize);
-
-        List<TaskQueuePb.TaskQueueAddRequest> result = new ArrayList<TaskQueuePb.TaskQueueAddRequest>();
-        for (QueueStateInfo.TaskStateInfo task : tasks)
-        {
-            TaskQueuePb.TaskQueueAddRequest addRequest = task.getAddRequest();
-            addRequest.setEtaUsec((long)(nowMillis * oneSecondInMilli + leaseSeconds * oneThousandSecondsInMilli));
-            result.add(addRequest);
-        }
-
-        return result;
+        TaskQueuePb.TaskQueueQueryAndOwnTasksResponse response = client.lease(request);
+        return response;
     }
 
-    synchronized TaskQueuePb.TaskQueueModifyTaskLeaseResponse modifyTaskLease( TaskQueuePb.TaskQueueModifyTaskLeaseRequest request )
-    {
-        TaskQueuePb.TaskQueueModifyTaskLeaseResponse response = new TaskQueuePb.TaskQueueModifyTaskLeaseResponse();
-
-        TaskQueuePb.TaskQueueAddRequest task = (TaskQueuePb.TaskQueueAddRequest)this.taskMap.get(request.getTaskName());
-
-        if (task == null)
-        {
-            throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.UNKNOWN_TASK.getValue());
-        }
-
-        if (task.getEtaUsec() != request.getEtaUsec())
-        {
-            throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.TASK_LEASE_EXPIRED.getValue());
-        }
-
-        long timeNowUsec = System.currentTimeMillis() * (long)oneSecondInMilli;
-        if (task.getEtaUsec() < timeNowUsec)
-        {
-            throw new ApiProxy.ApplicationException(TaskQueuePb.TaskQueueServiceError.ErrorCode.TASK_LEASE_EXPIRED.getValue());
-        }
-
-        long requestLeaseUsec = (long)(request.getLeaseSeconds() * oneThousandSecondsInMilli);
-        long etaUsec = timeNowUsec + requestLeaseUsec;
-        task.setEtaUsec(etaUsec);
-        response.setUpdatedEtaUsec(etaUsec);
+    synchronized TaskQueuePb.TaskQueueModifyTaskLeaseResponse modifyTaskLease(TaskQueuePb.TaskQueueModifyTaskLeaseRequest request) {
+        logger.log(Level.FINE, "PullQueue: Sending modifyTaskLeaseRequest to TaskQueue server for " + request.getTaskName());
+        TaskQueuePb.TaskQueueModifyTaskLeaseResponse response = client.modifyLease(request);
         return response;
     }
 }

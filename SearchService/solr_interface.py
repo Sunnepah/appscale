@@ -2,7 +2,7 @@
 import calendar
 import logging
 import os
-import simplejson
+import json
 import sys
 import urllib2
 
@@ -13,8 +13,7 @@ from datetime import datetime
 
 from query_parser import Document
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../lib"))
-import appscale_info
+from appscale.common import appscale_info
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../AppServer"))
 from google.appengine.datastore.document_pb import FieldValue
@@ -57,7 +56,7 @@ class Solr():
     solr_url = "http://{0}:{1}/solr/update?commit=true".format(self._search_location,
       self.SOLR_SERVER_PORT)
     logging.debug("SOLR URL: {0}".format(solr_url))
-    json_request = simplejson.dumps(solr_request)
+    json_request = json.dumps(solr_request)
     logging.debug("SOLR JSON: {0}".format(json_request))
     try:
       req = urllib2.Request(solr_url, data=json_request)
@@ -65,7 +64,7 @@ class Solr():
       conn = urllib2.urlopen(req) 
       if conn.getcode() != HTTP_OK:
         raise search_exceptions.InternalError("Malformed response from SOLR.")
-      response = simplejson.load(conn)
+      response = json.load(conn)
       status = response['responseHeader']['status'] 
       logging.debug("Response: {0}".format(response))
     except ValueError, exception:
@@ -101,7 +100,7 @@ class Solr():
       conn = urllib2.urlopen(solr_url)
       if conn.getcode() != HTTP_OK:
         raise search_exceptions.InternalError("Malformed response from SOLR.")
-      response = simplejson.load(conn)
+      response = json.load(conn)
       logging.debug("Response: {0}".format(response))
     except ValueError, exception:
       logging.error("Unable to decode json from SOLR server: {0}".format(
@@ -137,14 +136,14 @@ class Solr():
 
     solr_url = "http://{0}:{1}/solr/schema/fields".format(
       self._search_location, self.SOLR_SERVER_PORT)
-    json_request = simplejson.dumps(field_list)
+    json_request = json.dumps(field_list)
     try:
       req = urllib2.Request(solr_url, data=json_request)
       req.add_header('Content-Type', 'application/json')
       conn = urllib2.urlopen(req) 
       if conn.getcode() != HTTP_OK:
         raise search_exceptions.InternalError("Malformed response from SOLR.")
-      response = simplejson.load(conn)
+      response = json.load(conn)
       status = response['responseHeader']['status'] 
       logging.debug("Response: {0}".format(response))
     except ValueError, exception:
@@ -199,7 +198,7 @@ class Solr():
     """
     docs = []
     docs.append(hash_map)
-    json_payload = simplejson.dumps(docs)
+    json_payload = json.dumps(docs)
     solr_url = "http://{0}:{1}/solr/update/json?commit=true".format(
       self._search_location, self.SOLR_SERVER_PORT)
     try:
@@ -210,7 +209,7 @@ class Solr():
         logging.error("Got code {0} with URL {1} and payload {2}".format(
         conn.getcode(), solr_url, json_payload))
         raise search_exceptions.InternalError("Bad request sent to SOLR.")
-      response = simplejson.load(conn)
+      response = json.load(conn)
       status = response['responseHeader']['status'] 
       logging.debug("Response: {0}".format(response))
     except ValueError, exception:
@@ -357,7 +356,7 @@ class Solr():
         logging.error("Got code {0} with URL {1}.".format(
           conn.getcode(), solr_url))
         raise search_exceptions.InternalError("Bad request sent to SOLR.")
-      response = simplejson.load(conn)
+      response = json.load(conn)
       status = response['responseHeader']['status'] 
       logging.debug("Response: {0}".format(response))
     except ValueError, exception:
@@ -400,7 +399,8 @@ class Solr():
     """
     new_doc = new_result.mutable_document()
     new_doc.set_id(doc['id'])
-    new_doc.set_language(doc[Document.INDEX_LOCALE][0])
+    if Document.INDEX_LOCALE in doc:
+      new_doc.set_language(doc[Document.INDEX_LOCALE][0])
     for key in doc.keys():
       if not key.startswith(index.name):
         continue

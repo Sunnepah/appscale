@@ -23,7 +23,7 @@ class AppManagerClient
   attr_reader :conn, :ip
 
   # The port that the AppManager binds to, by default.
-  SERVER_PORT = 49934
+  SERVER_PORT = 17445
 
   # Initialization function for AppManagerClient
   def initialize(ip)
@@ -36,13 +36,12 @@ class AppManagerClient
     @conn.add_method("start_app", "config")
     @conn.add_method("stop_app", "app_name")
     @conn.add_method("stop_app_instance", "app_name", "port")
-    @conn.add_method("restart_app_instances_for_app", "app_name", "language")
   end
 
   # Check the comments in AppController/lib/app_controller_client.rb.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -74,10 +73,9 @@ class AppManagerClient
   # Args:
   #   app_name: Name of the application
   #   app_port: The port to run the application server
-  #   load_balancer_ip: The public IP of the load balancer
+  #   login_ip: The public IP of this deployemnt
   #   load_balancer_port: The port of the load balancer
   #   language: The language the application is written in
-  #   xmpp_ip: The IP for XMPP
   #   env_vars: A Hash of environemnt variables that should be passed to the
   #     application to start.
   #   max_memory: An Integer that names the maximum amount of memory (in
@@ -92,17 +90,15 @@ class AppManagerClient
   #
   def start_app(app_name,
                 app_port,
-                load_balancer_ip,
+                login_ip,
                 language,
-                xmpp_ip,
                 env_vars,
                 max_memory=500,
                 syslog_server="")
     config = {'app_name' => app_name,
               'app_port' => app_port,
-              'load_balancer_ip' => load_balancer_ip,
+              'login_ip' => login_ip,
               'language' => language,
-              'xmpp_ip' => xmpp_ip,
               'env_vars' => env_vars,
               'max_memory' => max_memory,
               'syslog_server' => syslog_server}
@@ -143,22 +139,6 @@ class AppManagerClient
     result = ""
     make_call(MAX_TIME_OUT, false, "stop_app") {
       result = @conn.stop_app(app_name)
-    }
-    return result
-  end
-
-  # Wrapper for SOAP call to the AppManager to kill all the processes running
-  # the named application.
-  #
-  # Args:
-  #   app_name: A String representing the name of the application.
-  #   language: A String, the language the app is written in.
-  # Returns:
-  #   An Array of process IDs that were killed, that had been hosting the app.
-  def restart_app_instances_for_app(app_name, language)
-    result = ""
-    make_call(MAX_TIME_OUT, false, "restart_app_instances_for_app") {
-      result = @conn.restart_app_instances_for_app(app_name, language)
     }
     return result
   end

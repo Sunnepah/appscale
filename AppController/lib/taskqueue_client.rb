@@ -4,6 +4,7 @@ require 'base64'
 require 'helperfunctions'
 require 'json'
 require 'net/http'
+require 'taskqueue'
 require 'timeout'
 
 # Number of seconds to wait before timing out when doing a remote call.
@@ -20,21 +21,18 @@ class TaskQueueClient
   attr_reader :conn, :ip
 
   # The port that the TaskQueue Server binds to.
-  SERVER_PORT = 64839
-
-  # Location of where the nearest taskqueue server is.
-  NEAREST_TQ_LOCATION = '/etc/appscale/rabbitmq_ip'
+  SERVER_PORT = 17446
 
   # Initialization function for TaskQueueClient
-  def initialize()
-    @ip = HelperFunctions.read_file(NEAREST_TQ_LOCATION)
+  def initialize(which_ip)
+    @ip = which_ip
   end
 
 
   # Check the comments in AppController/lib/app_controller_client.rb.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -99,16 +97,20 @@ class TaskQueueClient
     json_config = JSON.dump(config)
     response = nil
      
-    make_call(MAX_TIME_OUT, false, "reload_worker"){
-      url = URI.parse('http://' + @ip + ":#{SERVER_PORT}/reloadworker")
-      http = Net::HTTP.new(url.host, url.port)
-      response = http.post(url.path,
-                           json_config,
-                           {'Content-Type'=>'application/json'})
+    ports = TaskQueue.get_server_ports()
+
+    ports.each{ |port|
+      make_call(MAX_TIME_OUT, false, "reload_worker"){
+        url = URI.parse('http://' + @ip + ":#{port}/reloadworker")
+        http = Net::HTTP.new(url.host, url.port)
+        response = http.post(url.path,
+                            json_config,
+                            {'Content-Type'=>'application/json'})
+      }
+      if response.nil?
+        Djinn.log_warn("Unable to get a response from TaskQueue server on port: #{port}")
+      end
     }
-    if response.nil?
-      return {"error" => true, "reason" => "Unable to get a response"}
-    end
 
     return JSON.load(response.body)
   end

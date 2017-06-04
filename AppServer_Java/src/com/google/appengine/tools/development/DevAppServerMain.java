@@ -16,6 +16,10 @@ import com.google.appengine.tools.util.Parser.ParseResult;
 import java.awt.Toolkit;
 import java.io.File;
 import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -34,9 +38,9 @@ public class DevAppServerMain
     public static final String  GENERATED_WAR_DIR_ARG                 = "generated_war_dir";
     private static final String DEFAULT_RDBMS_PROPERTIES_FILE         = ".local.rdbms.properties";
     private static final String RDBMS_PROPERTIES_FILE_SYSTEM_PROPERTY = "rdbms.properties.file";
-    
+
     private static final String SYSTEM_PROPERTY_STATIC_MODULE_PORT_NUM_PREFIX = "com.google.appengine.devappserver_module.";
-    
+
     private static String       originalTimeZone;
     private final Action        ACTION                                = new StartAction();
 
@@ -209,32 +213,44 @@ public class DevAppServerMain
         	}
         }, new DevAppServerOption(main, null, "admin_console_version", false)
         { // changed from admin_console_server
-                    public void apply()
-                    {
-                        this.main.admin_console_version = getValue();
-                        System.setProperty("ADMIN_CONSOLE_VERSION", this.main.admin_console_version);
-                    }
-                }, new DevAppServerOption(main, null, "APP_NAME", false)
-                {
-                    public void apply()
-                    {
-                        System.setProperty("APP_NAME", getValue());
-                    }
-                }, new DevAppServerOption(main, null, "NGINX_ADDRESS", false)
-                {
-                    public void apply()
-                    {
-                        System.setProperty("NGINX_ADDR", getValue());
-                    }
-                }, new DevAppServerOption(main, null, "NGINX_PORT", false)
-                {
-                    public void apply()
-                    {
-                        System.setProperty("NGINX_PORT", getNginxPort());
-                    }
-                } });
+            public void apply()
+            {
+                this.main.admin_console_version = getValue();
+                System.setProperty("ADMIN_CONSOLE_VERSION", this.main.admin_console_version);
+            }
+        }, new DevAppServerOption(main, null, "APP_NAME", false)
+        {
+            public void apply()
+            {
+                System.setProperty("APP_NAME", getValue());
+            }
+        }, new DevAppServerOption(main, null, "NGINX_ADDRESS", false)
+        {
+            public void apply()
+            {
+                System.setProperty("NGINX_ADDR", getValue());
+            }
+        }, new DevAppServerOption(main, null, "NGINX_PORT", false)
+        {
+            public void apply()
+            {
+                System.setProperty("NGINX_PORT", getNginxPort());
+            }
+        }, new DevAppServerOption(main, null, "TQ_PROXY", false)
+        {
+            public void apply()
+            {
+                System.setProperty("TQ_PROXY", getValue());
+            }
+        }, new DevAppServerOption(main, null, "pidfile", false)
+        {
+            public void apply()
+            {
+                System.setProperty("PIDFILE", getValue());
+            }
+        }});
     }
-    
+
     private static void processInstancePorts(List<String> optionValues) {
       for (String optionValue : optionValues) {
         String[] keyAndValue = optionValue.split("=", 2);
@@ -428,6 +444,13 @@ public class DevAppServerMain
                     updateCheck.maybePrintNagScreen(System.err);
                 }
                 updateCheck.checkJavaVersion(System.err);
+
+                String pidfile = System.getProperty("PIDFILE");
+                if (pidfile != null) {
+                    String pidString = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+                    Path file = Paths.get(pidfile);
+                    Files.write(file, pidString.getBytes());
+                }
 
                 DevAppServer server = new DevAppServerFactory().createDevAppServer(appDir, externalResourceDir, DevAppServerMain.this.address, DevAppServerMain.this.port, noJavaAgent);
 

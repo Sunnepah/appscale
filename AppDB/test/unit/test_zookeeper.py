@@ -1,23 +1,19 @@
 #!/usr/bin/env python
 # Programmer: Navraj Chohan <nlake44@gmail.com>
 
-import os
-import sys
-import time
-import unittest
-
-from flexmock import flexmock
 import kazoo.client
 import kazoo.exceptions
 import kazoo.protocol
 import kazoo.protocol.states
+import time
+import unittest
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))  
-from dbconstants import *
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))  
-from zkappscale import zktransaction as zk
-from zkappscale.zktransaction import ZKTransactionException
+from appscale.datastore.dbconstants import MAX_GROUPS_FOR_XG
+from appscale.datastore.zkappscale import zktransaction as zk
+from appscale.datastore.zkappscale.zktransaction import ZKTransactionException
+from appscale.datastore.zkappscale.inspectable_counter import \
+  InspectableCounter
+from flexmock import flexmock
 
 
 class TestZookeeperTransaction(unittest.TestCase):
@@ -40,11 +36,7 @@ class TestZookeeperTransaction(unittest.TestCase):
     fake_zookeeper.should_receive('start')
     fake_zookeeper.should_receive('retry').and_return(None)
 
-    fake_counter = flexmock(name='fake_counter', value='value')
-    fake_counter.value = 1
-    fake_counter.should_receive('__add__').and_return(2)
-    fake_zookeeper.should_receive("Counter").and_return(fake_counter)
-    # mock out deleting the zero id we get the first time around
+    flexmock(InspectableCounter).should_receive('__add__').and_return(1)
 
     flexmock(kazoo.client)
     kazoo.client.should_receive('KazooClient').and_return(fake_zookeeper)
@@ -318,7 +310,7 @@ class TestZookeeperTransaction(unittest.TestCase):
       "txid", "somekey", True))
 
     # Test for existing max groups
-    lock_list = ['path' + str(num+1) for num in range(zk.MAX_GROUPS_FOR_XG)]
+    lock_list = ['path' + str(num+1) for num in range(MAX_GROUPS_FOR_XG)]
     lock_list_str = zk.LOCK_LIST_SEPARATOR.join(lock_list)
     fake_zookeeper.should_receive('retry').with_args('get', str) \
       .and_return([lock_list_str])

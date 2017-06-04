@@ -58,7 +58,7 @@ class AppControllerClient
   # A constructor that requires both the IP address of the machine to communicate
   # with as well as the secret (string) needed to perform communication.
   # AppControllers will reject SOAP calls if this secret (basically a password)
-  # is not present - it can be found in the user's .appscale directory, and a
+  # is not present - it can be found in the /etc/appscale directory, and a
   # helper method is usually present to fetch this for us.
   def initialize(ip, secret)
     @ip = ip
@@ -67,11 +67,9 @@ class AppControllerClient
     @conn = SOAP::RPC::Driver.new("https://#{@ip}:#{SERVER_PORT}")
     # Disable certificate verification.
     @conn.options["protocol.http.ssl_config.verify_mode"] = nil
-    @conn.add_method("set_parameters", "djinn_locations", "database_credentials", "app_names", "secret")
+    @conn.add_method("set_parameters", "layout", "options", "secret")
     @conn.add_method("set_apps_to_restart", "apps_to_restart", "secret")
-    @conn.add_method("status", "secret")
-    @conn.add_method("get_stats", "secret")
-    @conn.add_method("upload_app", "app", "secret")
+    @conn.add_method("upload_app", "archived_file", "file_suffix", "email", "secret")
     @conn.add_method("update", "app_names", "secret")
     @conn.add_method("stop_app", "app_name", "secret")    
     @conn.add_method("get_all_public_ips", "secret")
@@ -81,6 +79,12 @@ class AppControllerClient
     @conn.add_method("remove_role", "old_role", "secret")
     @conn.add_method("get_queues_in_use", "secret")
     @conn.add_method("set_node_read_only", "read_only", "secret")
+    @conn.add_method("primary_db_is_up", "secret")
+    @conn.add_method("get_app_upload_status", "reservation_id", "secret")
+    @conn.add_method("get_cluster_stats_json", "secret")
+    @conn.add_method("get_node_stats_json", "secret")
+    @conn.add_method("get_instance_info", "secret")
+    @conn.add_method("get_request_info", "app_id", "secret")
   end
 
 
@@ -111,7 +115,7 @@ class AppControllerClient
   #   exceeded.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -138,41 +142,20 @@ class AppControllerClient
   end
 
 
-  def set_parameters(locations, options, apps_to_start)
+  def set_parameters(layout, options)
     result = ""
     make_call(10, ABORT_ON_FAIL, "set_parameters") { 
-      result = conn.set_parameters(locations, options, apps_to_start, @secret)
+      result = conn.set_parameters(layout, options, @secret)
     }  
     if result =~ /Error:/
       raise FailedNodeException.new("set_parameters returned #{result}.")
     end
   end
 
-  def status(print_output=true)
-    status = get_status()
-         
-    if print_output
-      puts "Status of node at #{ip}:"
-      puts "#{status}"
-    end
-
-    return status
-  end
-
-  def get_status()
-    if !HelperFunctions.is_port_open?(@ip, 17443)
-      raise FailedNodeException.new("Cannot talk to AppController at #{@ip}.")
-    end
-
-    make_call(10, RETRY_ON_FAIL, "get_status") { @conn.status(@secret) }
-  end
-
-  def get_stats()
-    make_call(10, RETRY_ON_FAIL, "get_stats") { @conn.get_stats(@secret) }
-  end
-
-  def upload_app(app)
-    make_call(30, RETRY_ON_FAIL, "upload_app") { @conn.upload_app(app, @secret) }
+  def upload_app(archived_file, file_suffix, email)
+    make_call(30, RETRY_ON_FAIL, "upload_app") {
+      @conn.upload_app(archived_file, file_suffix, email, @secret)
+    }
   end
 
   def stop_app(app_name)
@@ -228,6 +211,34 @@ class AppControllerClient
   def set_node_read_only(read_only)
     make_call(NO_TIMEOUT, RETRY_ON_FAIL, "set_node_read_only") {
       @conn.set_node_read_only(read_only, @secret)
+    }
+  end
+
+  # Checks if the Cassandra seed node is up.
+  def primary_db_is_up()
+    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "primary_db_is_up") {
+      @conn.primary_db_is_up(@secret)
+    }
+  end
+
+  # Checks the status of an app upload.
+  def get_app_upload_status(reservation_id)
+    make_call(NO_TIMEOUT, RETRY_ON_FAIL, "get_app_upload_status") {
+      @conn.get_app_upload_status(reservation_id, @secret)
+    }
+  end
+
+  # Gets the statistics of all the nodes in the AppScale deployment.
+  def get_cluster_stats_json()
+    make_call(10, RETRY_ON_FAIL, "get_cluster_stats_json") {
+      @conn.get_cluster_stats_json(@secret)
+    }
+  end
+
+  # Gets the statistics of this node
+  def get_node_stats_json()
+    make_call(10, RETRY_ON_FAIL, "get_node_stats_json") {
+      @conn.get_node_stats_json(@secret)
     }
   end
 

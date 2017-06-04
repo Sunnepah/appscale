@@ -29,6 +29,8 @@ export APPSCALE_VERSION=$(grep AppScale "$VERSION_FILE" | sed 's/AppScale versio
 
 PACKAGE_CACHE="/var/cache/appscale"
 
+# Default directory for external library jars
+APPSCALE_EXT="/usr/share/appscale/ext/"
 
 pipwrapper ()
 {
@@ -71,11 +73,11 @@ cachepackage() {
 # at next boot. AppScale manages those services.
 disableservice() {
     if [ -n "$1" ]; then
-      update-rc.d "${1}" disable || true
-      # The following to make sure we disable it for upstart.
-      if [ -d "/etc/init" ]; then
-          echo "manual" > /etc/init/"${1}".override
-      fi
+        update-rc.d "${1}" disable || true
+        # The following to make sure we disable it for upstart.
+        if [ -d "/etc/init" ]; then
+            echo "manual" > /etc/init/"${1}".override
+        fi
     else
         echo "Need a service name to disable!"
         exit 1
@@ -154,6 +156,7 @@ root            hard    nofile           200000
 root            soft    nofile           200000
 *               hard    nofile           200000
 *               soft    nofile           200000
+*               -       nproc            32768
 EOF
 }
 
@@ -185,10 +188,7 @@ EOF
 EOF
 
     # This create link to appscale settings.
-    rm -rfv ${DESTDIR}${CONFIG_DIR}
-    mkdir -pv ~/.appscale
-    mkdir -pv ${APPSCALE_HOME_RUNTIME}/.appscale
-    ln -sfv ${APPSCALE_HOME_RUNTIME}/.appscale ${DESTDIR}${CONFIG_DIR}
+    mkdir -pv ${DESTDIR}${CONFIG_DIR}
 
     cat <<EOF | tee ${CONFIG_DIR}/home || exit
 ${APPSCALE_HOME_RUNTIME}
@@ -211,7 +211,8 @@ EOF
 
     # This puts in place the logrotate rules.
     if [ -d /etc/logrotate.d/ ]; then
-        cp ${APPSCALE_HOME}/lib/templates/appscale-logrotate.conf /etc/logrotate.d/appscale
+        cp ${APPSCALE_HOME}/common/appscale/common/templates/appscale-logrotate.conf \
+            /etc/logrotate.d/appscale
     fi
 
     # Logrotate AppScale logs hourly.
@@ -236,7 +237,9 @@ installappserverjava()
     JAVA_SDK_PACKAGE="appengine-java-sdk-1.8.4.zip"
     JAVA_SDK_PACKAGE_MD5="f5750b0c836870a3089096fd537a1272"
     cachepackage ${JAVA_SDK_PACKAGE} ${JAVA_SDK_PACKAGE_MD5}
-    unzip "${PACKAGE_CACHE}/${JAVA_SDK_PACKAGE}" -d ${JAVA_SDK_DIR}
+
+    echo "Extracting Java SDK"
+    unzip -q "${PACKAGE_CACHE}/${JAVA_SDK_PACKAGE}" -d ${JAVA_SDK_DIR}
 
     # Compile source file.
     (cd ${JAVA_SDK_DIR} && ant install && ant clean-build)
@@ -249,7 +252,7 @@ installappserverjava()
 
 installtornado()
 {
-    pipwrapper tornado
+    pipwrapper tornado==4.2.0
 }
 
 installflexmock()
@@ -275,13 +278,19 @@ installgems()
     # Rake 10.0 depecates rake/rdoctask - upgrade later.
     gem install rake ${GEMOPT}
     sleep 1
-    # ZK 1.0 breaks our existing code - upgrade later.
-    gem install zookeeper
+    if [ "${UNAME_MACHINE}" = "x86_64" ]; then
+        gem install zookeeper
+    else
+        # The current zookeeper gem has x86-specific assembly code.
+        CUSTOM_ZK_GEM="zookeeper-1.4.11.gem"
+        cachepackage ${CUSTOM_ZK_GEM} 2117f0814722715a3c765211842337eb
+        gem install --local ${PACKAGE_CACHE}/${CUSTOM_ZK_GEM}
+    fi
     sleep 1
     gem install json ${GEMOPT} -v 1.8.3
     sleep 1
     gem install soap4r-ruby1.9 ${GEMOPT}
-    gem install httparty ${GEMOPT} -v 0.13.7
+    gem install httparty ${GEMOPT} -v 0.14.0
     gem install httpclient ${GEMOPT}
     # This is for the unit testing framework.
     gem install simplecov ${GEMOPT}
@@ -300,7 +309,6 @@ installphp54()
 
 postinstallnginx()
 {
-    cp -v ${APPSCALE_HOME}/AppDashboard/setup/load-balancer.conf /etc/nginx/sites-enabled/
     rm -fv /etc/nginx/sites-enabled/default
     chmod +x /root
 }
@@ -321,33 +329,29 @@ installsolr()
 
 installcassandra()
 {
-    CASSANDRA_VER=2.1.15
+    CASSANDRA_VER=3.7
 
     CASSANDRA_PACKAGE="apache-cassandra-${CASSANDRA_VER}-bin.tar.gz"
-    CASSANDRA_PACKAGE_MD5="3ef581936b5a1d3bc2f2f189e6530ced"
+    CASSANDRA_PACKAGE_MD5="39968c48cbb2a333e525f852db59fb48"
     cachepackage ${CASSANDRA_PACKAGE} ${CASSANDRA_PACKAGE_MD5}
 
     # Remove old Cassandra environment directory.
     rm -rf ${APPSCALE_HOME}/AppDB/cassandra
 
     CASSANDRA_DIR="/opt/cassandra"
-    CASSANDRA_ENV="${APPSCALE_HOME}/AppDB/cassandra_env"
+    CASSANDRA_DATA_DIR="/opt/appscale/cassandra"
     mkdir -p ${CASSANDRA_DIR}
+    mkdir -p ${CASSANDRA_DATA_DIR}
     rm -rf ${CASSANDRA_DIR}/cassandra
     tar xzf "${PACKAGE_CACHE}/${CASSANDRA_PACKAGE}" -C ${CASSANDRA_DIR}
-    mv -v ${CASSANDRA_DIR}/apache-cassandra-${CASSANDRA_VER} ${CASSANDRA_DIR}/cassandra
+    mv -v ${CASSANDRA_DIR}/apache-cassandra-${CASSANDRA_VER} \
+        ${CASSANDRA_DIR}/cassandra
 
-    chmod -v +x ${CASSANDRA_DIR}/cassandra/bin/cassandra
-    cp -v ${CASSANDRA_ENV}/templates/cassandra-env.sh\
-        ${CASSANDRA_DIR}/cassandra/conf
-    mkdir -p /var/lib/cassandra
-    # TODO only grant the cassandra user access.
-    chmod 777 /var/lib/cassandra
-
-    pipwrapper cassandra-driver
-
-    # Create separate log directory.
-    mkdir -pv /var/log/appscale/cassandra
+    if ! id -u cassandra &> /dev/null ; then
+        useradd cassandra
+    fi
+    chown -R cassandra ${CASSANDRA_DIR}
+    chown -R cassandra ${CASSANDRA_DATA_DIR}
 }
 
 postinstallcassandra()
@@ -359,7 +363,7 @@ postinstallcassandra()
 
 installservice()
 {
-    # This must be absolete path of runtime.
+    # This must be absolute path of runtime.
     mkdir -pv ${DESTDIR}/etc/init.d/
     cp ${APPSCALE_HOME_RUNTIME}/AppController/scripts/appcontroller ${DESTDIR}/etc/init.d/appscale-controller
     chmod -v a+x ${DESTDIR}/etc/init.d/appscale-controller
@@ -367,6 +371,12 @@ installservice()
     # Make sure the init script runs each time, so that it can start the
     # AppController on system reboots.
     update-rc.d -f appscale-controller defaults
+
+    # Prevent monit from immediately restarting services at boot.
+    cp ${APPSCALE_HOME}/AppController/scripts/appscale-unmonit.sh \
+      /etc/init.d/appscale-unmonit
+    chmod -v a+x /etc/init.d/appscale-unmonit
+    update-rc.d appscale-unmonit defaults 19 21
 }
 
 postinstallservice()
@@ -394,14 +404,11 @@ installzookeeper()
         dpkg -i /tmp/${ZK_REPO_PKG}
         apt-get update
         apt-get install -y zookeeper-server
-    else
-        apt-get install -y zookeeper zookeeperd zookeeper-bin
     fi
 
     # Trusty's kazoo version is too old, so use the version in Xenial.
     case "$DIST" in
         precise|trusty|wheezy) pipwrapper "kazoo==2.2.1" ;;
-        *) apt-get install python-kazoo ;;
     esac
 }
 
@@ -432,14 +439,6 @@ postinstallzookeeper()
         # Let's add a rotation directive.
         echo "log4j.appender.ROLLINGFILE.MaxBackupIndex=3" >> /etc/zookeeper/conf/log4j.properties
     fi
-}
-
-installcelery()
-{
-    if [ "$DIST" = "precise" ]; then
-        pipwrapper Celery
-    fi
-    pipwrapper Flower
 }
 
 postinstallrabbitmq()
@@ -520,6 +519,14 @@ EOF
     disableservice monit
 }
 
+postinstallejabberd()
+{
+    # Install ejabberd authentication script.
+    cp ${APPSCALE_HOME}/AppController/scripts/ejabberd_auth.py /etc/ejabberd
+    chown ejabberd:ejabberd /etc/ejabberd/ejabberd_auth.py
+    chmod +x /etc/ejabberd/ejabberd_auth.py
+}
+
 installpsutil()
 {
     case ${DIST} in
@@ -530,14 +537,114 @@ installpsutil()
 installapiclient()
 {
     # The InfrastructureManager requires the Google API client.
-    pipwrapper google-api-python-client
+    pipwrapper google-api-python-client==1.5.4
 }
 
-buildgo()
+installgosdk()
 {
-    GOROOT_DIR=${APPSCALE_HOME_RUNTIME}/AppServer/goroot
-    export GOROOT=${GOROOT_DIR}
-    GO_VERSION=`cat ${GOROOT_DIR}/VERSION`
-    echo "Building ${GO_VERSION} ..."
-    (cd ${GOROOT_DIR}/src && ./make.bash)
+    if [ ${UNAME_MACHINE} = "x86_64" ]; then
+        GO_SDK_PACKAGE="go_appengine_sdk_linux_amd64-1.9.48.zip"
+        GO_SDK_PACKAGE_MD5="b5c1a3eab1ba69993c3a35661ec3043d"
+    else
+        GO_SDK_PACKAGE="go_appengine_sdk_linux_386-1.9.48.zip"
+        GO_SDK_PACKAGE_MD5="b6aad6a3cb2506dfe1067e06fb93f9fb"
+    fi
+
+    EXTRAS_DIR="/opt"
+    cachepackage ${GO_SDK_PACKAGE} ${GO_SDK_PACKAGE_MD5}
+
+    echo "Extracting Go SDK"
+    # Remove existing SDK directory in case it's old.
+    rm -rf ${EXTRAS_DIR}/go_appengine
+    unzip -q ${PACKAGE_CACHE}/${GO_SDK_PACKAGE} -d ${EXTRAS_DIR}
+}
+
+installpycapnp()
+{
+    pipwrapper pycapnp
+}
+
+preplogserver()
+{
+    LOGSERVER_DIR="/opt/appscale/logserver"
+    mkdir -p ${LOGSERVER_DIR}
+    FILE_SRC="$APPSCALE_HOME_RUNTIME/LogService/logging.capnp"
+    FILE_DEST="$APPSCALE_HOME_RUNTIME/AppServer/google/appengine/api/logservice/logging.capnp"
+    cp ${FILE_SRC} ${FILE_DEST}
+}
+
+installcommon()
+{
+    pip install --upgrade --no-deps ${APPSCALE_HOME}/common
+    pip install ${APPSCALE_HOME}/common
+}
+
+installadminserver()
+{
+    pip install --upgrade --no-deps ${APPSCALE_HOME}/AdminServer
+    pip install ${APPSCALE_HOME}/AdminServer
+}
+
+installhermes()
+{
+    pip install --upgrade --no-deps ${APPSCALE_HOME}/Hermes
+    pip install ${APPSCALE_HOME}/Hermes
+}
+
+installtaskqueue()
+{
+    pip install --upgrade --no-deps ${APPSCALE_HOME}/AppTaskQueue[celery_gui]
+    # Fill in new dependencies.
+    # See pip.pypa.io/en/stable/user_guide/#only-if-needed-recursive-upgrade.
+    pip install ${APPSCALE_HOME}/AppTaskQueue[celery_gui]
+}
+
+installdatastore()
+{
+    pip install --upgrade --no-deps ${APPSCALE_HOME}/AppDB
+    pip install ${APPSCALE_HOME}/AppDB
+}
+
+prepdashboard()
+{
+    rm -rf ${APPSCALE_HOME}/AppDashboard/vendor
+    pip install -t ${APPSCALE_HOME}/AppDashboard/vendor wstools==0.4.3
+    pip install -t ${APPSCALE_HOME}/AppDashboard/vendor SOAPpy
+    pip install -t ${APPSCALE_HOME}/AppDashboard/vendor python-crontab
+}
+
+upgradepip()
+{
+    # Versions older than Pip 7 did not correctly parse install commands for
+    # local packages with optional dependencies.
+    case "$DIST" in
+        precise|wheezy|trusty)
+            pipwrapper pip
+            # Account for the change in the path to the pip binary.
+            hash -r
+            ;;
+    esac
+}
+
+fetchclientjars()
+{
+    # This function fetches modified client jars for the MapReduce, Pipeline,
+    # and GCS APIs. You can compile them using Maven from the following repos:
+    # github.com/AppScale/appengine-mapreduce
+    # github.com/AppScale/appengine-pipelines
+    # github.com/AppScale/appengine-gcs-client
+    mkdir -p ${APPSCALE_EXT}
+
+    MAPREDUCE_JAR="appscale-mapreduce-0.8.5.jar"
+    cachepackage ${MAPREDUCE_JAR} "93f5101fa6ec761b33f4bf2ac8449447"
+
+    PIPELINE_JAR="appscale-pipeline-0.2.13.jar"
+    cachepackage ${PIPELINE_JAR} "a6e4555c604a05897a48260429ce50c6"
+
+    GCS_JAR="appscale-gcs-client-0.6.jar"
+    cachepackage ${GCS_JAR} "a03671de058acc7ea41144976868765c"
+
+    cp "${PACKAGE_CACHE}/${MAPREDUCE_JAR}" ${APPSCALE_EXT}
+    cp "${PACKAGE_CACHE}/${PIPELINE_JAR}" ${APPSCALE_EXT}
+    cp "${PACKAGE_CACHE}/${GCS_JAR}" ${APPSCALE_EXT}
 }

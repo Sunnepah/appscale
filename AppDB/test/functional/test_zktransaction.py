@@ -1,12 +1,11 @@
 import sys
+import threading
 import time
 import unittest
-import base64
-import re
-import threading
+
+from appscale.datastore import dbconstants
+from appscale.datastore.zkappscale import zktransaction
 from test import test_support
-from dbconstants import *
-import zkappscale.zktransaction
 
 class TestZKTransaction(unittest.TestCase):
 
@@ -78,9 +77,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       ret = self.zk.acquire_lock(app, txid, key2)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_DIFFERENT_ROOTKEY, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_DIFFERENT_ROOTKEY, e.getType())
     ret = self.zk.release_lock(app, txid)
     self.assertTrue(ret)
 
@@ -96,9 +95,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       ret = self.zk.acquire_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
 
   def test_lockinvalidid(self):
     app = "testapp"
@@ -107,9 +106,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       self.zk.acquire_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
 
   def test_lock1000(self):
     app = "testapp"
@@ -129,9 +128,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       self.zk.release_lock(app, txid)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_INVALID, e.getType())
 
   def test_releasewithoutlock(self):
     app = "testapp"
@@ -151,9 +150,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       ret = self.zk.release_lock(app, txid, key2)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_DIFFERENT_ROOTKEY, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_DIFFERENT_ROOTKEY, e.getType())
     ret = self.zk.release_lock(app, txid, key)
     self.assertTrue(ret)
 
@@ -307,8 +306,8 @@ class TestZKTransaction(unittest.TestCase):
   def test_gcsimple(self):
     # timeout very fast
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 1
-    zkappscale.zktransaction.GC_INTERVAL = 1
+    dbconstants.MAX_TX_DURATION = 1
+    zktransaction.GC_INTERVAL = 1
 #    self.zk.setRollbackFunction(self.__rollbackReceiver)
     # restart gc thread
     self.keylist = None
@@ -326,15 +325,15 @@ class TestZKTransaction(unittest.TestCase):
     try:
       self.zk.release_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
     try:
       self.zk.acquire_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
 
 #    self.assertEqual(txid, self.txid)
 #    self.assertEqual(key, self.rootkey)
@@ -342,16 +341,16 @@ class TestZKTransaction(unittest.TestCase):
 
     # revert settings
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 30
-    zkappscale.zktransaction.GC_INTERVAL = 30
+    dbconstants.MAX_TX_DURATION = 30
+    zktransaction.GC_INTERVAL = 30
 #    self.zk.setRollbackFunction(None)
     self.zk.startGC()
 
   def test_gcwithkeylist(self):
     # timeout very fast
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 1
-    zkappscale.zktransaction.GC_INTERVAL = 1
+    dbconstants.MAX_TX_DURATION = 1
+    zktransaction.GC_INTERVAL = 1
 #    self.zk.setRollbackFunction(self.__rollbackReceiver)
     # restart gc thread
     self.keylist = None
@@ -371,15 +370,15 @@ class TestZKTransaction(unittest.TestCase):
     try:
       self.zk.release_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
     try:
       self.zk.acquire_lock(app, txid, key)
       self.fail()
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
 
 #    self.assertEqual(app, self.app_id)
 #    self.assertEqual(txid, self.txid)
@@ -389,16 +388,16 @@ class TestZKTransaction(unittest.TestCase):
 
     # revert settings
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 30
-    zkappscale.zktransaction.GC_INTERVAL = 30
+    dbconstants.MAX_TX_DURATION = 30
+    zktransaction.GC_INTERVAL = 30
 #    self.zk.setRollbackFunction(None)
     self.zk.startGC()
 
   def test_gcreleaselock(self):
     # timeout very fast
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 1
-    zkappscale.zktransaction.GC_INTERVAL = 1
+    dbconstants.MAX_TX_DURATION = 1
+    zktransaction.GC_INTERVAL = 1
 #    self.zk.setRollbackFunction(self.__rollbackReceiver)
     # restart gc thread
     self.keylist = None
@@ -421,8 +420,8 @@ class TestZKTransaction(unittest.TestCase):
 
     # revert settings
 #    self.zk.stopGC()
-    zkappscale.zktransaction.TX_TIMEOUT = 30
-    zkappscale.zktransaction.GC_INTERVAL = 30
+    dbconstants.MAX_TX_DURATION = 30
+    zktransaction.GC_INTERVAL = 30
 #    self.zk.setRollbackFunction(None)
     self.zk.startGC()
 
@@ -446,9 +445,9 @@ class TestZKTransaction(unittest.TestCase):
     try:
       ret = self.zk.release_lock(app, txid)
       self.fail
-    except zkappscale.zktransaction.ZKTransactionException as e:
+    except zktransaction.ZKTransactionException as e:
       print e
-      self.assertEqual(zkappscale.zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
+      self.assertEqual(zktransaction.ZKTransactionException.TYPE_EXPIRED, e.getType())
 
   def test_updateafterrollback(self):
     app = "testapp"
@@ -489,7 +488,7 @@ class TestZKTransaction(unittest.TestCase):
 
 if __name__ == "__main__":
   global zkconnection
-  zkconnection = zkappscale.zktransaction.ZKTransaction()
+  zkconnection = zktransaction.ZKTransaction()
   if len(sys.argv) > 1 and sys.argv[1] == "dump":
     zkconnection.dump_tree("/appscale")
   else:

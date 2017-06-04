@@ -22,6 +22,8 @@ GOOGLE_METADATA="http://169.254.169.254/computeMetadata/v1/instance/"
 GUESTBOOK_URL="http://www.appscale.com/wp-content/uploads/2014/07/guestbook.tar.gz"
 GUESTBOOK_APP="/root/guestbook.tar.gz"
 USE_DEMO_APP="Y"
+FORCE_PRIVATE="N"
+AZURE_METADATA="http://169.254.169.254/metadata/v1/InstanceInfo"
 
 # On some system, when running this scipt from rc.local (ie at boot time)
 # there may not be any user set, which will cause ssh-copy-id to fail.
@@ -30,13 +32,14 @@ export HOME="/root"
 
 # Print help screen.
 usage() {
-        echo "Usage: $0 [--user <email> --passwd <password>][--no-demo-app]"
-        echo
-        echo "Options:"
-        echo "  --user <email>          administrator's email"
-        echo "  --passwd <password>     administrator's password"
-        echo "  --no-demo-app           don't start the demo application"
-        echo
+    echo "Usage: $0 [--user <email> --passwd <password>][--no-demo-app]"
+    echo
+    echo "Options:"
+    echo "  --user <email>          administrator's email"
+    echo "  --passwd <password>     administrator's password"
+    echo "  --no-demo-app           don't start the demo application"
+    echo "  --force-private         don't use public IP (needed for marketplace)"
+    echo
 }
 
 # We need to be root. Usually we login as ubuntu, then sudo.
@@ -86,6 +89,11 @@ while [ $# -gt 0 ]; do
         USE_DEMO_APP="N"
         continue
     fi
+    if [ "$1" = "--force-private" ]; then
+        shift
+        FORCE_PRIVATE="Y"
+        continue
+    fi
     usage
     exit 1
 done
@@ -100,17 +108,20 @@ fi
 # Let's try to detect the environment we are using.
 PUBLIC_IP=""
 PRIVATE_IP=""
+
 if grep docker /proc/1/cgroup > /dev/null ; then
     # We need to start sshd by hand.
     /usr/sbin/sshd
     # Force Start cron
-    /usr/sbin/cron 
+    /usr/sbin/cron
     PROVIDER="Docker"
 elif lspci | grep VirtualBox > /dev/null ; then
     PROVIDER="VirtualBox"
 elif ${CURL} -iLs metadata.google.internal |grep 'Metadata-Flavor: Google' > /dev/null ; then
     # As per https://cloud.google.com/compute/docs/metadata.
     PROVIDER="GCE"
+elif [ "$(${CURL} -s -o /dev/null -w "%{http_code}" $AZURE_METADATA)" = "200" ] ; then
+    PROVIDER="Azure"
 else
     # Get the public and private IP of this instance.
     PUBLIC_IP="$(ec2metadata --public-ipv4 2> /dev/null)"
@@ -132,7 +143,7 @@ else
 fi
 
 # Let's make sure we got the IPs to use in the configuration.
-case "$PROVIDER" in 
+case "$PROVIDER" in
 "AWS" )
     # Set variables for AWS. We already have the IPs.
     ADMIN_PASSWD="$(ec2metadata --instance-id)"
@@ -146,8 +157,14 @@ case "$PROVIDER" in
     ${CURL} -Lo /tmp/hostname -sH "Metadata-Flavor: Google" ${GOOGLE_METADATA}/hostname
     cut -f 1 -d '.' /tmp/hostname > /etc/hostname
     hostname -b -F /etc/hostname
-    ADMIN_PASSWD="$(cat /etc/hostname)"
-    ADMIN_EMAIL="a@a.com"
+    # Set admin user email and password.
+    ADMIN_EMAIL="$(${CURL} --fail -sH "Metadata-Flavor: Google" ${GOOGLE_METADATA}/attributes/adminUser)"
+    ADMIN_PASSWD="$(${CURL} --fail -sH "Metadata-Flavor: Google" ${GOOGLE_METADATA}/attributes/appscale_user_password)"
+    if [ -z "$ADMIN_PASSWD" ]; then
+        echo "Google Cloud Launcher context missing. Using Google Compute Engine defaults."
+        ADMIN_EMAIL="a@a.com"
+        ADMIN_PASSWD="$(cat /etc/hostname)"
+    fi
     ;;
 "VirtualBox")
     # Let's discover the device used for external communication. In
@@ -161,6 +178,13 @@ case "$PROVIDER" in
         fi
     done
     PRIVATE_IP="$($IP addr show dev ${DEFAULT_DEV} scope global | sed -n 's;.*inet \([0-9.]*\).*;\1;p')"
+    ;;
+"Azure")
+    DEFAULT_DEV="$($IP route list scope global | sed 's/.*dev \b\([A-Za-z0-9_]*\).*/\1/' | uniq)"
+    PUBLIC_IP="$(wget http://ipinfo.io/ip -qO -)"
+    PRIVATE_IP="$($IP addr show dev ${DEFAULT_DEV} scope global | sed -n 's;.*inet \([0-9.]*\).*;\1;p')"
+    ADMIN_EMAIL="a@a.com"
+    ADMIN_PASSWD="$(cat /etc/hostname)"
     ;;
 * )
     # Let's discover the device used for external communication.
@@ -188,7 +212,11 @@ if [ ! -e AppScalefile ]; then
     echo -n "Creating AppScalefile..."
     echo "ips_layout :" > AppScalefile
     echo "  controller : ${PRIVATE_IP}" >> AppScalefile
-    echo "login : ${PUBLIC_IP}" >> AppScalefile
+    if [ "${FORCE_PRIVATE}" = "Y" ]; then
+        echo "login : ${PRIVATE_IP}" >> AppScalefile
+    else
+        echo "login : ${PUBLIC_IP}" >> AppScalefile
+    fi
     if [ -z "${ADMIN_EMAIL}" ]; then
         echo "test : true" >> AppScalefile
     else
@@ -210,9 +238,11 @@ if [ ! -e AppScalefile ]; then
     ssh-keyscan $PUBLIC_IP $PRIVATE_IP 2> /dev/null >> .ssh/known_hosts
 
     # Download sample app.
-    echo -n "Downloading sample app..."
-    ${CURL} -Lso ${GUESTBOOK_APP} ${GUESTBOOK_URL}
-    echo "done."
+    if [ ! -e ${GUESTBOOK_APP} ]; then
+      echo -n "Downloading sample app..."
+      ${CURL} -Lso ${GUESTBOOK_APP} ${GUESTBOOK_URL}
+      echo "done."
+    fi
 else
     # If AppScalefile is present, do not redeploy the demo app.
     USE_DEMO_APP="N"
@@ -220,6 +250,11 @@ fi
 
 # Start AppScale.
 ${APPSCALE_CMD} up
+
+# We need to set the login after AppScale is up for marketplace.
+if [ "${FORCE_PRIVATE}" = "Y" ]; then
+    ${APPSCALE_CMD} set login ${PUBLIC_IP}
+fi
 
 # If we don't need to deploy the demo app, we are done.
 if [ "${USE_DEMO_APP}" != "Y" ]; then
