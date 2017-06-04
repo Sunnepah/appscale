@@ -23,18 +23,27 @@ from appscale.common import (
 from appscale.common.constants import SCHEMA_CHANGE_TIMEOUT
 from appscale.common.unpackaged import APPSCALE_PYTHON_APPSERVER
 from appscale.datastore.cassandra_env.cassandra_interface import KEYSPACE
-from cassandra import (InvalidRequest,
-                       OperationTimedOut)
+from cassandra import (
+  InvalidRequest,
+  OperationTimedOut
+)
 from cassandra.cluster import SimpleStatement
 from cassandra.policies import FallthroughRetryPolicy
-from distutils.spawn import find_executable
-from queue import InvalidLeaseRequest
-from queue import PullQueue
-from queue import PushQueue
-from task import Task
-from tq_config import TaskQueueConfig
-from .queue import TransientError
-from .utils import logger
+from .queue import (
+  InvalidLeaseRequest,
+  PullQueue,
+  PushQueue,
+  TransientError
+)
+from .task import Task
+from .tq_config import TaskQueueConfig
+from .utils import (
+  CELERY_CONFIG_DIR,
+  CELERY_WORKER_DIR,
+  get_celery_queue_name,
+  get_queue_function_name,
+  logger
+)
 
 sys.path.append(APPSCALE_PYTHON_APPSERVER)
 from google.appengine.api import apiproxy_stub_map
@@ -43,8 +52,6 @@ from google.appengine.api import datastore_distributed
 from google.appengine.api.taskqueue import taskqueue_service_pb
 from google.appengine.ext import db
 from google.appengine.runtime import apiproxy_errors
-
-sys.path.append(TaskQueueConfig.CELERY_WORKER_DIR)
 
 # A policy that does not retry statements.
 NO_RETRIES = FallthroughRetryPolicy()
@@ -236,7 +243,7 @@ class DistributedTaskQueue():
   TASK_NAME_KIND = "__task_name__"
 
   # A dict that tells celery to run tasks even though we are running as root.
-  CELERY_ENV_VARS = {"C_FORCE_ROOT" : True}
+  CELERY_ENV_VARS = {'C_FORCE_ROOT': True}
 
   # The max memory allocated to celery worker pools in MB.
   CELERY_MAX_MEMORY = 1000
@@ -251,8 +258,8 @@ class DistributedTaskQueue():
       db_access: A DatastoreProxy object.
     """
     file_io.mkdir(self.LOG_DIR)
-    file_io.mkdir(TaskQueueConfig.CELERY_WORKER_DIR)
-    file_io.mkdir(TaskQueueConfig.CELERY_CONFIG_DIR)
+    file_io.mkdir(CELERY_WORKER_DIR)
+    file_io.mkdir(CELERY_CONFIG_DIR)
 
     setup_env()
   
@@ -447,41 +454,47 @@ class DistributedTaskQueue():
       config = TaskQueueConfig(app_id, self.db_access)
       self.__queue_info_cache[app_id] = config.queues
       config.create_celery_file()
-      config.create_celery_worker_scripts()
     except (ValueError, NameError) as config_error:
       return json.dumps({'error': True, 'reason': config_error.message})
     except Exception as config_error:
       logger.exception('Unknown exception')
       return json.dumps({'error': True, 'reason': config_error.message})
    
-    log_file = self.LOG_DIR + app_id + ".log"
-    celery_bin = find_executable('celery')
-    command = [celery_bin,
-               "worker",
-               "--app=" + \
-                    TaskQueueConfig.get_celery_worker_module_name(app_id),
-               "--hostname=%h." + app_id,
-               "--workdir=" + TaskQueueConfig.CELERY_WORKER_DIR,
-               "--logfile=" + log_file,
-               "--time-limit=" + str(self.HARD_TIME_LIMIT),
-               "--autoscale={max},{min}".format(
-                 max=TaskQueueConfig.MAX_CELERY_CONCURRENCY,
-                 min=TaskQueueConfig.MIN_CELERY_CONCURRENCY),
-               "--soft-time-limit=" + str(self.TASK_SOFT_TIME_LIMIT),
-               "--pidfile=" + self.PID_FILE_LOC + 'celery___' + \
-                             app_id + ".pid",
-               "--statedb=" + TaskQueueConfig.CELERY_STATE_DIR + 'worker___' + \
-                             app_id + ".db",
-               "--autoreload -Ofair"]
-    start_command = str(' '.join(command))
-    stop_command = self.get_worker_stop_command(app_id)
+    log_file = os.path.join(self.LOG_DIR, '{}.log'.format(app_id))
+    pidfile = os.path.join('/', 'var', 'run', 'appscale',
+                           'celery-{}.pid'.format(app_id))
+    state_db = os.path.join(TaskQueueConfig.CELERY_STATE_DIR,
+                            'worker___{}.db'.format(app_id))
+    max_memory = self.CELERY_SAFE_MEMORY * \
+                 TaskQueueConfig.MAX_CELERY_CONCURRENCY
+
+    env_vars = {'APP_ID': app_id, 'HOST': appscale_info.get_login_ip()}
+    env_vars.update(self.CELERY_ENV_VARS)
+
+    start_cmd = ' '.join([
+      'celery', 'worker',
+      '--app', TaskQueueConfig.WORKER_MODULE,
+      '--hostname', app_id,
+      '--workdir', CELERY_WORKER_DIR,
+      '--logfile', log_file,
+      '--pidfile', pidfile,
+      '--time-limit', str(self.HARD_TIME_LIMIT),
+      '--autoscale', '{max},{min}'.format(
+        max=TaskQueueConfig.MAX_CELERY_CONCURRENCY,
+        min=TaskQueueConfig.MIN_CELERY_CONCURRENCY),
+      '--soft-time-limit', str(self.TASK_SOFT_TIME_LIMIT),
+      '--statedb', state_db,
+      '-Ofair'
+    ])
+
     watch = "celery-" + str(app_id)
-    monit_app_configuration.create_config_file(watch,
-                                               start_command, 
-                                               stop_command, 
-                                               [self.CELERY_PORT],
-                                               max_memory=self.CELERY_SAFE_MEMORY*TaskQueueConfig.MAX_CELERY_CONCURRENCY,
-                                               env_vars=self.CELERY_ENV_VARS)
+    monit_app_configuration.create_config_file(
+      watch,
+      start_cmd,
+      pidfile,
+      env_vars=env_vars,
+      max_memory=max_memory)
+
     if monit_interface.start(watch):
       json_response = {'error': False}
     else:
@@ -779,52 +792,20 @@ class DistributedTaskQueue():
     headers = self.get_task_headers(request)
     countdown = int(headers['X-AppEngine-TaskETA']) - \
                 int(datetime.datetime.now().strftime("%s"))
-    task_func = self.__get_task_function(request)
-    task_func.apply_async(
-      kwargs={'headers':headers, 'args':args},
+
+    push_queue = self.get_queue(request.app_id(), request.queue_name())
+    task_func = get_queue_function_name(push_queue.name)
+    celery_queue = get_celery_queue_name(request.app_id(), push_queue.name)
+
+    push_queue.celery.send_task(
+      task_func,
+      kwargs={'headers': headers, 'args': args},
       expires=args['expires'],
       acks_late=True,
       countdown=countdown,
-      queue=TaskQueueConfig.get_celery_queue_name(request.app_id(),
-                                                  request.queue_name()),
-      routing_key=TaskQueueConfig.get_celery_queue_name(request.app_id(),
-                                                        request.queue_name()))
-
-  def __get_task_function(self, request):
-    """ Returns a function pointer to a celery task. Loads the module for the
-    app/queue.
-
-    Args:
-      request: A taskqueue_service_pb.TaskQueueAddRequest.
-    Returns:
-      A function pointer to a celery task.
-    Raises:
-      taskqueue_service_pb.TaskQueueServiceError.
-    """
-    try:
-      task_module = __import__(TaskQueueConfig.\
-                  get_celery_worker_module_name(request.app_id()))
-
-      # If a new queue was added we need to relaod the python code.
-      if self.__force_reload:
-        start = time.time()
-        reload(task_module)
-        time_taken = time.time() - start
-        self.__force_reload = False
-        logger.info("Reloading module for {0} took {1} seconds.".\
-          format(request.app_id(), time_taken))
-
-      task_func = getattr(task_module, 
-        TaskQueueConfig.get_queue_function_name(request.queue_name()))
-      return task_func
-    except AttributeError, attribute_error:
-      logger.exception(attribute_error)
-      raise apiproxy_errors.ApplicationError(
-              taskqueue_service_pb.TaskQueueServiceError.UNKNOWN_QUEUE)
-    except ImportError, import_error:
-      logger.exception(import_error)
-      raise apiproxy_errors.ApplicationError(
-              taskqueue_service_pb.TaskQueueServiceError.UNKNOWN_QUEUE)
+      queue=celery_queue,
+      routing_key=celery_queue,
+    )
 
   def get_task_args(self, request):
     """ Gets the task args used when making a task web request.

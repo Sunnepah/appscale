@@ -74,7 +74,7 @@ class InfrastructureManagerClient
   # Check the comments in AppController/lib/app_controller_client.rb.
   def make_call(time, retry_on_except, callr)
     begin
-      Timeout::timeout(time) {
+      Timeout.timeout(time) {
         begin
           yield if block_given?
         rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH,
@@ -167,6 +167,9 @@ class InfrastructureManagerClient
     end
     parameters['instance_ids'] = instance_ids
     parameters['region'] = options['region']
+    parameters['IS_VERBOSE'] = options['verbose']
+    parameters['zone'] = options['zone']
+    parameters['autoscale_agent'] = true
 
     terminate_result = make_call(NO_TIMEOUT, RETRY_ON_FAIL,
       "terminate_instances") {

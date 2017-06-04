@@ -1,0 +1,244 @@
+""" Web server/client that polls the AppScale Portal for new tasks and
+initiates actions accordingly. """
+
+import argparse
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import sys
+import tarfile
+import urllib
+
+import tornado.escape
+import tornado.httpclient
+import tornado.web
+from appscale.common import appscale_info, appscale_utils
+from appscale.common.constants import LOG_FORMAT
+from appscale.common.ua_client import UAClient, UAException
+from appscale.common.unpackaged import APPSCALE_PYTHON_APPSERVER
+from tornado.ioloop import IOLoop, PeriodicCallback
+from tornado.options import options
+
+from appscale.hermes import constants, helper
+from appscale.hermes.handlers import MainHandler, TaskHandler, Respond404Handler
+from appscale.hermes.helper import JSONTags
+from appscale.hermes.stats.stats_app import StatsApp
+
+sys.path.append(APPSCALE_PYTHON_APPSERVER)
+from google.appengine.api.appcontroller_client import AppControllerException
+
+
+def poll():
+  """ Callback function that polls for new tasks based on a schedule. """
+  deployment_id = helper.get_deployment_id()
+  # If the deployment is not registered, skip.
+  if not deployment_id:
+    return
+
+  # If we can't reach the backup and recovery services, skip.
+  nodes = helper.get_node_info()
+  http_client = tornado.httpclient.HTTPClient()
+  for node in nodes:
+    br_host = node[helper.NodeInfoTags.HOST]
+    request = tornado.httpclient.HTTPRequest(br_host)
+    try:
+      response = http_client.fetch(request)
+      if json.loads(response.body)['status'] != 'up':
+        logging.warn('Backup and Recovery service at {} is not up.'
+          .format(br_host))
+        return
+    except (socket.error, ValueError):
+      logging.exception('Backup and Recovery service at {} is not up.'
+        .format(br_host))
+      return
+
+  logging.info("Polling for new task.")
+
+  # Send request to AppScale Portal.
+  url = "{0}{1}".format(constants.PORTAL_URL,
+                        constants.PORTAL_POLL_PATH)
+  data = urllib.urlencode({JSONTags.DEPLOYMENT_ID: deployment_id})
+  request = helper.create_request(url=url, method='POST', body=data)
+  response = helper.urlfetch(request)
+
+  if not response[JSONTags.SUCCESS]:
+    logging.error("Inaccessible resource: {}".format(url))
+    return
+
+  try:
+    data = json.loads(response[JSONTags.BODY])
+  except (TypeError, ValueError) as error:
+    logging.error("Cannot parse response from url '{0}'. Error: {1}".
+      format(url, str(error)))
+    return
+
+  if data == {}:  # If there's no task to perform.
+    return
+
+  # Verify all necessary fields are present in the request.
+  if not set(data.keys()).issuperset(set(constants.REQUIRED_KEYS)):
+    logging.error("Missing args in response: {0}".format(response))
+    return
+
+  logging.debug("Task to run: {0}".format(data))
+  logging.info("Redirecting task request to TaskHandler.")
+  url = "http://localhost:{}{}".format(constants.HERMES_PORT, '/do_task')
+  request = helper.create_request(url, method='POST', body=json.dumps(data))
+
+  # The poller can move forward without waiting for a response here.
+  helper.urlfetch_async(request)
+
+
+def deploy_sensor_app():
+  """ Uploads the sensor app for registered deployments. """
+
+  deployment_id = helper.get_deployment_id()
+  #If deployment is not registered, then do nothing.
+  if not deployment_id:
+    return
+
+  ua_client = UAClient(appscale_info.get_db_master_ip(), options.secret)
+
+  # If the appscalesensor app is already running, then do nothing.
+  if ua_client.is_app_enabled(constants.APPSCALE_SENSOR):
+    return
+
+  pwd = appscale_utils.encrypt_password(constants.USER_EMAIL,
+                                        appscale_utils.random_password_generator())
+  if create_appscale_user(pwd, ua_client) and create_xmpp_user(pwd, ua_client):
+    logging.debug("Created new user and now tarring app to be deployed.")
+    file_path = os.path.join(os.path.dirname(__file__), '../Apps/sensor')
+    app_dir_location = os.path.join(constants.APP_DIR_LOCATION,
+                                    constants.APPSCALE_SENSOR)
+    archive = tarfile.open(app_dir_location, "w|gz")
+    archive.add(file_path, arcname= constants.APPSCALE_SENSOR)
+    archive.close()
+
+    try:
+      logging.info("Deploying the sensor app for registered deployments.")
+      acc = appscale_info.get_appcontroller_client()
+      acc.upload_app(app_dir_location, constants.FILE_SUFFIX,
+                     constants.USER_EMAIL)
+    except AppControllerException:
+      logging.exception("AppControllerException while trying to deploy "
+        "appscalesensor app.")
+  else:
+    logging.error("Error while creating or accessing the user to deploy "
+      "appscalesensor app.")
+
+
+def create_appscale_user(password, uaserver):
+  """ Creates the user account with the email address and password provided. """
+  if uaserver.does_user_exist(constants.USER_EMAIL):
+    logging.debug("User {0} already exists, so not creating it again.".
+                  format(constants.USER_EMAIL))
+    return True
+
+  try:
+    uaserver.commit_new_user(constants.USER_EMAIL, password,
+                             constants.ACCOUNT_TYPE)
+    return True
+  except UAException as error:
+    logging.error('Error while creating an Appscale user: {}'.format(error))
+    return False
+
+
+def create_xmpp_user(password, uaserver):
+  """ Creates the XMPP account. If the user's email is a@a.com, then that
+  means their XMPP account name is a@login_ip. """
+  username_regex = re.compile('\A(.*)@')
+  username = username_regex.match(constants.USER_EMAIL).groups()[0]
+  xmpp_user = "{0}@{1}".format(username, appscale_info.get_login_ip())
+  xmpp_pass = appscale_utils.encrypt_password(xmpp_user, password)
+  if uaserver.does_user_exist(xmpp_user):
+    logging.debug("XMPP User {0} already exists, so not creating it again.".
+      format(xmpp_user))
+    return True
+
+  try:
+    uaserver.commit_new_user(xmpp_user, xmpp_pass,
+                             constants.ACCOUNT_TYPE)
+    logging.info("XMPP username is {0}".format(xmpp_user))
+    return True
+  except UAException as error:
+    logging.error('Error while creating an XMPP user: {}'.format(error))
+    return False
+
+
+def signal_handler(signal, frame):
+  """ Signal handler for graceful shutdown. """
+  logging.warning("Caught signal: {0}".format(signal))
+  IOLoop.instance().add_callback(shutdown)
+
+
+def shutdown():
+  """ Shuts down the server. """
+  logging.warning("Hermes is shutting down.")
+  IOLoop.instance().stop()
+
+
+def main():
+  """ Main. """
+  parser = argparse.ArgumentParser()
+  parser.add_argument('-v', '--verbose', action='store_true',
+                      help='Output debug-level logging')
+  parser.add_argument('--write-profile-log', action='store_true',
+                      help='Write CSV tables with stats on master node')
+  parser.add_argument('--track-processes-stats', action='store_true',
+                      help='Track resources used by monit processes')
+  parser.add_argument('--verbose-cluster-stats', action='store_true',
+                      help='Collect all available stats on master. By default '
+                           'master node requests only the most important stats '
+                           'fields.')
+  args = parser.parse_args()
+
+  logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
+  if args.verbose:
+    logging.getLogger().setLevel(logging.DEBUG)
+
+  options.define('secret', appscale_info.get_secret())
+
+  signal.signal(signal.SIGTERM, signal_handler)
+  signal.signal(signal.SIGINT, signal_handler)
+
+  is_master = appscale_info.get_private_ip() == appscale_info.get_headnode_ip()
+
+  if is_master:
+    # Periodically checks if the deployment is registered and uploads the
+    # appscalesensor app for registered deployments.
+    PeriodicCallback(deploy_sensor_app,
+                     constants.UPLOAD_SENSOR_INTERVAL).start()
+
+    # Periodically check with the portal for new tasks.
+    # Note: Currently, any active handlers from the tornado app will block
+    # polling until they complete.
+    PeriodicCallback(poll, constants.POLLING_INTERVAL).start()
+
+    # Only master Hermes node handles /do_task route
+    task_route = ('/do_task', TaskHandler)
+  else:
+    task_route = ('/do_task', Respond404Handler,
+                  dict(reason='Hermes slaves do not manage tasks from Portal'))
+
+  # Configure stats app
+  stats_app = StatsApp(is_master, track_processes=args.track_processes_stats,
+                       write_profile=args.write_profile_log,
+                       verbose_cluster_stats=args.verbose_cluster_stats)
+  stats_app.configure()
+  stats_app.start_publishers()
+
+  app = tornado.web.Application([
+    ("/", MainHandler),
+    task_route,
+  ] + stats_app.get_routes(), debug=False)
+
+  app.listen(constants.HERMES_PORT)
+
+  # Start loop for accepting http requests.
+  IOLoop.instance().start()
+
+  logging.info("Hermes is up and listening on port: {}."
+               .format(constants.HERMES_PORT))

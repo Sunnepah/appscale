@@ -56,6 +56,7 @@ case "$1" in
         installservice
         postinstallservice
         postinstallmonit
+        postinstallejabberd
         sethosts
         setulimits
         increaseconnections
@@ -67,6 +68,8 @@ case "$1" in
         installapiclient
         installgosdk
         installcommon
+        installadminserver
+        installhermes
         installtaskqueue
         installdatastore
         preplogserver
