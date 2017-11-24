@@ -1,8 +1,6 @@
 #!/usr/bin/ruby -w
 
-
 require 'fileutils'
-
 
 $:.unshift File.join(File.dirname(__FILE__))
 require 'app_dashboard'
@@ -13,7 +11,6 @@ require 'helperfunctions'
 require 'monit_interface'
 require 'user_app_client'
 
-
 # A module to wrap all the interactions with the nginx web server
 # Google App Engine applications can request that certain files should be
 # hosted statically, so we use the nginx web server for this. It is the
@@ -21,24 +18,23 @@ require 'user_app_client'
 # haproxy, which then load balances requests to AppServers. This module
 # configures and deploys nginx within AppScale.
 module Nginx
-
   CHANNELSERVER_PORT = 5280
 
-  CONFIG_EXTENSION = "conf"
+  CONFIG_EXTENSION = 'conf'.freeze
 
   # The path on the local filesystem where the nginx binary can be found.
-  NGINX_BIN = "/usr/sbin/nginx"
+  NGINX_BIN = '/usr/sbin/nginx'.freeze
 
   # Nginx AppScale log directory.
-  NGINX_LOG_PATH = "/var/log/nginx"
+  NGINX_LOG_PATH = '/var/log/nginx'.freeze
 
   # Nginx top configuration directory.
-  NGINX_PATH = "/etc/nginx"
+  NGINX_PATH = '/etc/nginx'.freeze
 
   MAIN_CONFIG_FILE = File.join(NGINX_PATH, "nginx.#{CONFIG_EXTENSION}")
 
   # Nginx sites-enabled path.
-  SITES_ENABLED_PATH = File.join(NGINX_PATH, "sites-enabled")
+  SITES_ENABLED_PATH = File.join(NGINX_PATH, 'sites-enabled')
 
   # These ports are the one visible from outside, ie the ones that we
   # attach to running applications. Default is to have a maximum of 21
@@ -50,7 +46,7 @@ module Nginx
   # app would have the set of ports (8080, 3700), (8081, 3701), and so on.
   SSL_PORT_OFFSET = 3700
 
-  def self.start()
+  def self.start
     # Nginx runs both a 'master process' and one or more 'worker process'es, so
     # when we have monit watch it, as long as one of those is running, nginx is
     # still running and shouldn't be restarted.
@@ -61,29 +57,27 @@ module Nginx
     MonitInterface.start_daemon(:nginx, start_cmd, stop_cmd, pidfile)
   end
 
-  def self.stop()
+  def self.stop
     MonitInterface.stop(:nginx, false)
   end
 
   # Kills nginx if there was a failure when trying to start/reload.
   #
-  def self.cleanup_failed_nginx()
-    Djinn.log_error("****Killing nginx because there was a FATAL error****")
+  def self.cleanup_failed_nginx
+    Djinn.log_error('****Killing nginx because there was a FATAL error****')
     `ps aux | grep nginx | grep worker | awk {'print $2'} | xargs kill -9`
   end
 
-  def self.reload()
-    Djinn.log_info("Reloading nginx service.")
+  def self.reload
+    Djinn.log_info('Reloading nginx service.')
     HelperFunctions.shell('service nginx reload')
-    if $?.to_i != 0
-      cleanup_failed_nginx()
-    end
+    cleanup_failed_nginx if $?.to_i != 0
   end
 
-  def self.is_running?()
+  def self.is_running?
     output = MonitInterface.is_running?(:nginx)
     Djinn.log_debug("Checking if nginx is already monitored: #{output}")
-    return output
+    output
   end
 
   # The port that nginx will be listen on for the given app number
@@ -96,21 +90,22 @@ module Nginx
   end
 
   # Return true if the configuration is good, false o.w.
-  def self.check_config()
+  def self.check_config
     HelperFunctions.shell("#{NGINX_BIN} -t -c #{MAIN_CONFIG_FILE}")
-    return ($?.to_i == 0)
+    ($?.to_i == 0)
   end
 
-  # Creates a Nginx config file for the provided app name on the load balancer.
+  # Creates a Nginx config file for the provided version on the load balancer.
   # Returns:
   #   boolean: indicates if the nginx configuration has been written.
-  def self.write_fullproxy_app_config(app_name, http_port, https_port,
+  def self.write_fullproxy_version_config(version_key, http_port, https_port,
     my_public_ip, my_private_ip, proxy_port, static_handlers, login_ip,
     language)
 
-    parsing_log = "Writing proxy for app #{app_name} with language #{language}.\n"
+    parsing_log = "Writing proxy for #{version_key} with language " \
+      "#{language}.\n"
 
-    secure_handlers = HelperFunctions.get_secure_handlers(app_name)
+    secure_handlers = HelperFunctions.get_secure_handlers(version_key)
     parsing_log += "Secure handlers: #{secure_handlers}.\n"
     always_secure_locations = secure_handlers[:always].map { |handler|
       HelperFunctions.generate_secure_location_config(handler, https_port)
@@ -122,9 +117,9 @@ module Nginx
     secure_static_handlers = []
     non_secure_static_handlers = []
     static_handlers.map { |handler|
-      if handler["secure"] == "always"
+      if handler['secure'] == 'always'
         secure_static_handlers << handler
-      elsif handler["secure"] == "never"
+      elsif handler['secure'] == 'never'
         non_secure_static_handlers << handler
       else
         secure_static_handlers << handler
@@ -140,11 +135,11 @@ module Nginx
     }.join
 
     # Java application needs a redirection for the blobstore.
-    java_blobstore_redirection = ""
-    if language == "java"
+    java_blobstore_redirection = ''
+    if language == 'java'
       java_blobstore_redirection = <<JAVA_BLOBSTORE_REDIRECTION
 location ~ /_ah/upload/.* {
-      proxy_pass            http://gae_#{app_name}_blobstore;
+      proxy_pass            http://gae_#{version_key}_blobstore;
       proxy_connect_timeout 600;
       proxy_read_timeout    600;
       client_body_timeout   600;
@@ -164,7 +159,7 @@ location / {
       proxy_set_header      X-Forwarded-Ssl $ssl;
       proxy_set_header      Host $http_host;
       proxy_redirect        off;
-      proxy_pass            http://gae_ssl_#{app_name};
+      proxy_pass            http://gae_ssl_#{version_key};
       proxy_connect_timeout 600;
       proxy_read_timeout    600;
       client_body_timeout   600;
@@ -184,7 +179,7 @@ location / {
       proxy_set_header      X-Forwarded-Ssl $ssl;
       proxy_set_header      Host $http_host;
       proxy_redirect        off;
-      proxy_pass            http://gae_#{app_name};
+      proxy_pass            http://gae_#{version_key};
       proxy_connect_timeout 600;
       proxy_read_timeout    600;
       client_body_timeout   600;
@@ -195,15 +190,15 @@ DEFAULT_CONFIG
 
     config = <<CONFIG
 # Any requests that aren't static files get sent to haproxy
-upstream gae_#{app_name} {
+upstream gae_#{version_key} {
     server #{my_private_ip}:#{proxy_port};
 }
 
-upstream gae_ssl_#{app_name} {
+upstream gae_ssl_#{version_key} {
     server #{my_private_ip}:#{proxy_port};
 }
 
-upstream gae_#{app_name}_blobstore {
+upstream gae_#{version_key}_blobstore {
     server #{my_private_ip}:#{BlobServer::HAPROXY_PORT};
 }
 
@@ -214,19 +209,18 @@ map $scheme $ssl {
 
 server {
     listen      #{http_port};
-    server_name #{my_public_ip}-#{app_name};
+    server_name #{my_public_ip}-#{version_key};
 
-    #root #{HelperFunctions::APPLICATIONS_DIR}/#{app_name}/app;
     # Uncomment these lines to enable logging, and comment out the following two
-    #access_log #{NGINX_LOG_PATH}/appscale-#{app_name}.access.log upstream;
+    #access_log #{NGINX_LOG_PATH}/appscale-#{version_key}.access.log upstream;
     #error_log  /dev/null crit;
     access_log  off;
-    error_log   #{NGINX_LOG_PATH}/appscale-#{app_name}.error.log;
+    error_log   #{NGINX_LOG_PATH}/appscale-#{version_key}.error.log;
 
     ignore_invalid_headers off;
     rewrite_log off;
     error_page 404 = /404.html;
-    set $cache_dir #{HelperFunctions::APPLICATIONS_DIR}/#{app_name}/cache;
+    set $cache_dir #{HelperFunctions::VERSION_ASSETS_DIR}/#{version_key};
 
     # If they come here using HTTPS, bounce them to the correct scheme.
     error_page 400 http://$host:$server_port$request_uri;
@@ -248,7 +242,7 @@ server {
 
 server {
     listen      #{https_port};
-    server_name #{my_public_ip}-#{app_name}-ssl;
+    server_name #{my_public_ip}-#{version_key}-ssl;
     ssl on;
     ssl_protocols TLSv1 TLSv1.1 TLSv1.2;  # don't use SSLv3 ref: POODLE
     ssl_certificate     #{NGINX_PATH}/mycert.pem;
@@ -258,16 +252,15 @@ server {
     error_page 400 https://$host:$server_port$request_uri;
     error_page 497 https://$host:$server_port$request_uri;
 
-    #root #{HelperFunctions::APPLICATIONS_DIR}/#{app_name}/app;
     # Uncomment these lines to enable logging, and comment out the following two
-    #access_log #{NGINX_LOG_PATH}/appscale-#{app_name}.access.log upstream;
+    #access_log #{NGINX_LOG_PATH}/appscale-#{version_key}.access.log upstream;
     #error_log  /dev/null crit;
     access_log  off;
-    error_log   #{NGINX_LOG_PATH}/appscale-#{app_name}.error.log;
+    error_log   #{NGINX_LOG_PATH}/appscale-#{version_key}.error.log;
 
     ignore_invalid_headers off;
     rewrite_log off;
-    set $cache_dir #{HelperFunctions::APPLICATIONS_DIR}/#{app_name}/cache;
+    set $cache_dir #{HelperFunctions::VERSION_ASSETS_DIR}/#{version_key};
 
     error_page 404 = /404.html;
 
@@ -288,41 +281,41 @@ server {
 CONFIG
 
     config_path = File.join(SITES_ENABLED_PATH,
-                            "appscale-#{app_name}.#{CONFIG_EXTENSION}")
+                            "appscale-#{version_key}.#{CONFIG_EXTENSION}")
 
     # Let's reload and overwrite only if something changed.
-    current = ""
+    current = ''
     current = File.read(config_path) if File.exists?(config_path)
     if current != config
       Djinn.log_debug(parsing_log)
-      File.open(config_path, "w+") { |dest_file| dest_file.write(config) }
-      reload_nginx(config_path, app_name)
+      File.open(config_path, 'w+') { |dest_file| dest_file.write(config) }
+      reload_nginx(config_path, version_key)
       return true
     end
 
-    Djinn.log_debug("No need to restart nginx: configuration didn't change.")
-    return false
+    Djinn.log_debug('No need to restart nginx: configuration didn\'t change.')
+    false
   end
 
-  def self.reload_nginx(config_path, app_name)
-    if Nginx.check_config()
-      Nginx.reload()
+  def self.reload_nginx(config_path, version_key)
+    if Nginx.check_config
+      Nginx.reload
       return true
-    else
-      Djinn.log_error("Unable to load Nginx config for #{app_name}")
-      FileUtils.rm_f(config_path)
-      return false
     end
+
+    Djinn.log_error("Unable to load Nginx config for #{version_key}")
+    FileUtils.rm_f(config_path)
+    false
   end
 
-  def self.remove_app(app_name)
-    config_name = "appscale-#{app_name}.#{CONFIG_EXTENSION}"
+  def self.remove_version(version_key)
+    config_name = "appscale-#{version_key}.#{CONFIG_EXTENSION}"
     FileUtils.rm_f(File.join(SITES_ENABLED_PATH, config_name))
-    Nginx.reload()
+    Nginx.reload
   end
 
   # Removes all the enabled sites
-  def self.clear_sites_enabled()
+  def self.clear_sites_enabled
     if File.directory?(SITES_ENABLED_PATH)
       sites = Dir.entries(SITES_ENABLED_PATH)
 
@@ -338,7 +331,7 @@ CONFIG
         File.join(SITES_ENABLED_PATH, site)
       }
       FileUtils.rm_f full_path_sites
-      Nginx.reload()
+      Nginx.reload
     end
   end
 
@@ -352,7 +345,7 @@ CONFIG
   #   nginx_port: An integer specifying the port for Nginx to listen on.
   #   location: A string specifying an Nginx location match.
   def self.add_service_location(service_name, service_host, service_port,
-    nginx_port, location='/')
+                                nginx_port, location = '/')
     proxy_pass = "#{service_host}:#{service_port}"
     config_path = File.join(SITES_ENABLED_PATH,
                             "#{service_name}.#{CONFIG_EXTENSION}")
@@ -415,13 +408,14 @@ CONFIG
 LOCATION
       config << location_conf
     end
-    config << "}"
+    config << '}'
 
     File.write(config_path, config)
     Nginx.reload
   end
 
-  # Set up the folder structure and creates the configuration files necessary for nginx
+  # Set up the folder structure and creates the configuration files
+  # necessary for nginx.
   def self.initialize_config
     config = <<CONFIG
 user www-data;
@@ -456,23 +450,22 @@ http {
 }
 CONFIG
 
-    HelperFunctions.shell("mkdir -p /var/log/nginx/")
+    HelperFunctions.shell('mkdir -p /var/log/nginx/')
     # Create the sites enabled folder
-    unless File.exists? SITES_ENABLED_PATH
-      FileUtils.mkdir_p SITES_ENABLED_PATH
-    end
+    FileUtils.mkdir_p SITES_ENABLED_PATH unless File.exists? SITES_ENABLED_PATH
 
     # Copy certs for ssl. Just copy files once to keep the certificate static.
     ['mykey.pem', 'mycert.pem'].each { |cert_file|
-      unless File.exist?("#{NGINX_PATH}/#{cert_file}") &&
-          !File.zero?("#{NGINX_PATH}/#{cert_file}")
-        FileUtils.cp("#{Djinn::APPSCALE_CONFIG_DIR}/certs/#{cert_file}",
-                     "#{NGINX_PATH}/#{cert_file}")
-      end
+      next if File.exist?("#{NGINX_PATH}/#{cert_file}") &&
+              !File.zero?("#{NGINX_PATH}/#{cert_file}")
+
+      FileUtils.cp("#{Djinn::APPSCALE_CONFIG_DIR}/certs/#{cert_file}",
+                   "#{NGINX_PATH}/#{cert_file}")
     }
 
-    # Write the main configuration file which sets default configuration parameters
-    File.open(MAIN_CONFIG_FILE, "w+") { |dest_file| dest_file.write(config) }
+    # Write the main configuration file which sets default configuration
+    # parameters
+    File.open(MAIN_CONFIG_FILE, 'w+') { |dest_file| dest_file.write(config) }
 
     # The pid file location was changed in the default nginx config for
     # Trusty. Because of this, the first reload after writing the new config

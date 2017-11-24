@@ -1,26 +1,23 @@
 #!/usr/bin/ruby -w
 
-
 # Imports within Ruby's standard libraries
 require 'base64'
 require 'digest'
 require 'fileutils'
+require 'find'
 require 'net/http'
 require 'openssl'
 require 'socket'
 require 'timeout'
 require 'tmpdir'
 
-
 # Imports for RubyGems
 require 'rubygems'
 require 'json'
 
-
 # Imports for AppController libraries
 $:.unshift File.join(File.dirname(__FILE__))
 require 'custom_exceptions'
-
 
 # BadConfigurationExceptions represent an exception that can be thrown by the
 # AppController or any other library it uses, if a method receives inputs
@@ -28,24 +25,21 @@ require 'custom_exceptions'
 class BadConfigurationException < StandardError
 end
 
-
 # HelperFunctions holds miscellaneous functions - functions that really aren't
 # bound to a particular service, but are reused across multiple functions.
 # TODO: Consider removing App Engine-related functions below into its
 # own helper class
 module HelperFunctions
-
-
   APPSCALE_HOME = ENV['APPSCALE_HOME']
-
 
   # The location on the filesystem where configuration files about
   # AppScale are stored.
-  APPSCALE_CONFIG_DIR = "/etc/appscale"
+  APPSCALE_CONFIG_DIR = '/etc/appscale'.freeze
 
+  # The directory where static version assets are stored.
+  VERSION_ASSETS_DIR = '/var/appscale/version_assets'.freeze
 
-  APPSCALE_KEYS_DIR = "#{APPSCALE_CONFIG_DIR}/keys/cloud1"
-
+  APPSCALE_KEYS_DIR = "#{APPSCALE_CONFIG_DIR}/keys/cloud1".freeze
 
   # The maximum amount of time, in seconds, that we are willing to wait for
   # a virtual machine to start up, from the initial run-instances request.
@@ -55,99 +49,74 @@ module HelperFunctions
   # started.
   MAX_VM_CREATION_TIME = 1800
 
-
   # Generic sleep time to take while waiting for remote operation to
   # complete.
   SLEEP_TIME = 10
 
-
   # Number of retries to do.
   RETRIES = 5
 
-
   IP_REGEX = /\d+\.\d+\.\d+\.\d+/
-
 
   FQDN_REGEX = /[\w\d\.\-]+/
 
-
   IP_OR_FQDN = /#{IP_REGEX}|#{FQDN_REGEX}/
-
 
   DELTA_REGEX = /([1-9][0-9]*)([DdHhMm]|[sS]?)/
 
-
   DEFAULT_SKIP_FILES_REGEX = /^(.*\/)?((app\.yaml)|(app\.yml)|(index\.yaml)|(index\.yml)|(\#.*\#)|(.*~)|(.*\.py[co])|(.*\/RCS\/.*)|(\..*)|)$/
 
+  TIME_IN_SECONDS = { 'd' => 86400,
+                      'h' => 3600,
+                      'm' => 60,
+                      's' => 1 }.freeze
 
-  TIME_IN_SECONDS = { "d" => 86400, "h" => 3600, "m" => 60, "s" => 1 }
-
-
-  CLOUDY_CREDS = ["ec2_access_key", "ec2_secret_key", "EC2_ACCESS_KEY",
-    "EC2_SECRET_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "CLOUD_EC2_ACCESS_KEY", "CLOUD_EC2_SECRET_KEY"]
-
+  CLOUDY_CREDS = %w[ec2_access_key ec2_secret_key EC2_ACCESS_KEY
+                    EC2_SECRET_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+                    CLOUD_EC2_ACCESS_KEY CLOUD_EC2_SECRET_KEY].freeze
 
   # A constant that indicates that SSL should be used when checking if a given
   # port is open.
   USE_SSL = true
 
-
   # A constant that indicates that SSL should not be used when checking if a
   # given port is open.
   DONT_USE_SSL = false
 
-
-  # The IPv4 address that corresponds to the reserved localhost IP.
-  LOCALHOST_IP = "127.0.0.1"
-
+  # 'he IPv4 address that corresponds to the reserved localhost IP.
+  LOCALHOST_IP = '127.0.0.1'.freeze
 
   # The file permissions that indicate that only the owner of a file
   # can read or write to it (necessary for SSH keys).
   CHMOD_READ_ONLY = 0600
 
-
   # A class variable that is used to locally cache our own IP address, so that
   # we don't keep asking the system for it.
   @@my_local_ip = nil
 
-
   # A prefix used to distinguish gae apps from appscale apps
-  GAE_PREFIX = "gae_"
-
+  GAE_PREFIX = 'gae_'.freeze
 
   # The location on the filesystem where the AppController writes information
   # about the exception that killed it, for the tools to retrieve and pass
   # along to the user.
-  APPCONTROLLER_CRASHLOG_LOCATION = "/var/log/appscale/appcontroller_crashlog.txt"
-
+  APPCONTROLLER_CRASHLOG_LOCATION = '/var/log/appscale/appcontroller' \
+                                    '_crashlog.txt'.freeze
 
   # The location on the filesystem where the AppController backs up its
   # internal state, in case it isn't able to contact ZooKeeper to retrieve it.
-  APPCONTROLLER_STATE_LOCATION = "/opt/appscale/appcontroller-state.json"
-
+  APPCONTROLLER_STATE_LOCATION = '/opt/appscale/appcontroller-state.json'.freeze
 
   # The location on the filesystem where the resolv.conf file can be found,
   # that we may alter if the user requests.
-  RESOLV_CONF = "/etc/resolv.conf"
-
-
-  # The proc file to use to read the load of the system.
-  PROC_LOAD_FILE = "/proc/loadavg"
-
-
-  # The proc file to use to read memory installed.
-  PROC_MEM_FILE = "/proc/meminfo"
-
+  RESOLV_CONF = '/etc/resolv.conf'.freeze
 
   # Where we store the applications code.
-  APPLICATIONS_DIR = "/var/apps"
-
+  APPLICATIONS_DIR = '/var/apps'.freeze
 
   # Metadata service for Google and AWS
-  GCE_METADATA = "http://169.254.169.254/computeMetadata/v1/instance"
-  AWS_METADATA = "http://169.254.169.254/latest/meta-data"
-
+  GCE_METADATA = 'http://169.254.169.254/computeMetadata/v1/instance'.freeze
+  AWS_METADATA = 'http://169.254.169.254/latest/meta-data'.freeze
 
   # Curb the number of entries to print to this number. For example when
   # we print the appengine list, we will print only up to this constant,
@@ -155,66 +124,55 @@ module HelperFunctions
   NUM_ENTRIES_TO_PRINT = 10
 
   def self.shell(cmd)
-    return `#{cmd}`
+    `#{cmd}`
   end
-
 
   def self.write_file(location, contents)
-    File.open(location, "w+") { |file| file.write(contents) }
+    File.open(location, 'w+') { |file| file.write(contents) }
   end
-
 
   def self.write_json_file(location, contents)
-    self.write_file(location, JSON.dump(contents))
+    write_file(location, JSON.dump(contents))
   end
 
-
-  def self.read_file(location, chomp=true)
+  def self.read_file(location, chomp = true)
     file = File.open(location) { |f| f.read }
-    if chomp
-      return file.chomp
-    else
-      return file
-    end
+    return file.chomp if chomp
+    file
   end
-
 
   # Reads the given file, which is assumed to be a JSON-loadable object,
   # and returns that JSON back to the caller.
   def self.read_json_file(location)
-    data = self.read_file(location)
-    return JSON.load(data)
+    data = read_file(location)
+    JSON.load(data)
   end
-
 
   # Extracts the version from the VERSION file.
   def self.get_appscale_version
-    version_contents = self.read_file(APPSCALE_CONFIG_DIR + '/VERSION')
+    version_contents = read_file(APPSCALE_CONFIG_DIR + '/VERSION')
     version_line = version_contents[/AppScale version (.*)/]
     version_line.sub! 'AppScale version', ''
-    return version_line.strip()
+    version_line.strip
   end
-
 
   # Returns a random string composed of alphanumeric characters, as long
   # as the user requests.
-  def self.get_random_alphanumeric(length=10)
-    random = ""
-    possible = "0123456789abcdefghijklmnopqrstuvxwyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  def self.get_random_alphanumeric(length = 10)
+    random = ''
+    possible = '0123456789abcdefghijklmnopqrstuvxwyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
     possible_length = possible.length
 
     length.times {
       random << possible[Kernel.rand(possible_length)]
     }
 
-    return random
+    random
   end
-
 
   def self.deserialize_info_from_tools(ips)
-    return JSON.load(ips)
+    JSON.load(ips)
   end
-
 
   # Queries the operating system to see if the named process is running.
   #
@@ -224,20 +182,17 @@ module HelperFunctions
   # Args:
   #   name: A String naming the process that may or may not be running.
   def self.is_process_running?(name)
-    if `ps ax | grep #{name} | grep -v grep`.empty?
-      return false
-    else
-      return true
-    end
+    return false if `ps ax | grep #{name} | grep -v grep`.empty?
+    true
   end
-
 
   def self.kill_process(name)
     `ps ax | grep #{name} | grep -v grep | awk '{ print $1 }' | xargs -d '\n' kill -9`
   end
 
-
-  def self.sleep_until_port_is_open(ip, port, use_ssl=DONT_USE_SSL, timeout=nil)
+  def self.sleep_until_port_is_open(ip, port,
+                                    use_ssl = DONT_USE_SSL,
+                                    timeout = nil)
     total_time_slept = 0
     sleep_time = 1
 
@@ -245,19 +200,20 @@ module HelperFunctions
       return if HelperFunctions.is_port_open?(ip, port, use_ssl)
 
       Kernel.sleep(sleep_time)
-      if total_time_slept % 5 == 0
-        Djinn.log_debug("Waiting on #{ip}:#{port} to be open (currently closed).")
+      if (total_time_slept % 5).zero?
+        Djinn.log_debug("Waiting on #{ip}:#{port} to be open " \
+                        '(currently closed).')
       end
       total_time_slept += sleep_time
 
-      if !timeout.nil? and total_time_slept > timeout
+      if !timeout.nil? && total_time_slept > timeout
         raise "Waited too long for #{ip}:#{port} to open!"
       end
     }
   end
 
-
-  def self.sleep_until_port_is_closed(ip, port, use_ssl=DONT_USE_SSL, timeout=nil)
+  def self.sleep_until_port_is_closed(ip, port, use_ssl = DONT_USE_SSL,
+                                      timeout = nil)
     total_time_slept = 0
     sleep_time = 1
 
@@ -265,8 +221,9 @@ module HelperFunctions
       return unless HelperFunctions.is_port_open?(ip, port, use_ssl)
 
       Kernel.sleep(sleep_time)
-      if total_time_slept % 5 == 0
-        Djinn.log_debug("Waiting on #{ip}:#{port} to be closed (currently open).")
+      if (total_time_slept % 5).zero?
+        Djinn.log_debug("Waiting on #{ip}:#{port} to be closed " \
+                        '(currently open).')
       end
       total_time_slept += sleep_time
 
@@ -276,8 +233,7 @@ module HelperFunctions
     }
   end
 
-
-  def self.is_port_open?(ip, port, use_ssl=DONT_USE_SSL)
+  def self.is_port_open?(ip, port, use_ssl = DONT_USE_SSL)
     max = 2
     refused_count = 0
 
@@ -285,7 +241,7 @@ module HelperFunctions
       Timeout.timeout(1) do
         sock = TCPSocket.new(ip, port)
         if use_ssl
-          ssl_context = OpenSSL::SSL::SSLContext.new()
+          ssl_context = OpenSSL::SSL::SSLContext.new
           unless ssl_context.verify_mode
             ssl_context.verify_mode = OpenSSL::SSL::VERIFY_NONE
           end
@@ -297,10 +253,11 @@ module HelperFunctions
         return true
       end
     rescue OpenSSL::SSL::SSLError
-      Djinn.log_debug("Retry after SSL error talking to  #{ip}:#{port}")
+      Djinn.log_debug("Retry after SSL error talking to #{ip}:#{port}")
       refused_count += 1
       if refused_count > max
-        Djinn.log_warn("[is_port_open]: saw SSL error talking to  #{ip}:#{port}")
+        Djinn.log_warn("[is_port_open]: saw SSL error talking to " \
+                       "#{ip}:#{port}")
       else
         Kernel.sleep(1)
         retry
@@ -309,14 +266,16 @@ module HelperFunctions
       Djinn.log_warn("[is_port_open](#{ip}, #{port}): got #{except.message}.")
     end
 
-    return false
+    false
   end
 
   def self.run_remote_command(ip, command, public_key_loc, want_output)
-    Djinn.log_debug("ip is [#{ip}], command is [#{command}], public key is [#{public_key_loc}], want output? [#{want_output}]")
+    Djinn.log_debug("ip is [#{ip}], command is [#{command}], public key " \
+                    "is [#{public_key_loc}], want output? [#{want_output}]")
     public_key_loc = File.expand_path(public_key_loc)
 
-    remote_cmd = "ssh -i #{public_key_loc} -o StrictHostkeyChecking=no root@#{ip} '#{command} "
+    remote_cmd = "ssh -i #{public_key_loc} -o StrictHostkeyChecking=no" \
+                 " root@#{ip} '#{command} "
 
     if want_output
       remote_cmd << "2>&1'"
@@ -326,9 +285,8 @@ module HelperFunctions
 
     Djinn.log_debug("Running [#{remote_cmd}]")
 
-    return self.shell("#{remote_cmd}")
+    shell("#{remote_cmd}")
   end
-
 
   # Executes the given command on the specified host, without attempting to
   # redirect standard out or standard err.
@@ -346,13 +304,14 @@ module HelperFunctions
   # Returns:
   #   The output of executing the command on the specified host.
   def self.run_remote_command_without_output(ip, command, public_key_loc)
-    Djinn.log_debug("ip is [#{ip}], command is [#{command}], public key is [#{public_key_loc}]")
+    Djinn.log_debug("ip is [#{ip}], command is [#{command}], public key " \
+                    "is [#{public_key_loc}]")
     public_key_loc = File.expand_path(public_key_loc)
-    remote_cmd = "ssh -i #{public_key_loc} -o StrictHostkeyChecking=no root@#{ip} '#{command}'"
+    remote_cmd = "ssh -i #{public_key_loc} -o StrictHostkeyChecking=no " \
+                 "root@#{ip} '#{command}'"
     Djinn.log_debug("Running [#{remote_cmd}]")
-    return self.shell("#{remote_cmd}")
+    shell(remote_cmd.to_s)
   end
-
 
   # Secure copies a given file to a remote location.
   # Args:
@@ -363,15 +322,18 @@ module HelperFunctions
   #   from: A Boolean to indicate to copy a file *from* the remote location.
   # Raises:
   #   AppScaleSCPException: When a scp fails.
-  def self.scp_file(local_file_loc, remote_file_loc, target_ip, private_key_loc, from=false)
+  def self.scp_file(local_file_loc, remote_file_loc, target_ip,
+                    private_key_loc, from = false)
     private_key_loc = File.expand_path(private_key_loc)
     local_file_loc = File.expand_path(local_file_loc)
 
     # Adjust the command to copy from or to depending on the flag.
     if from
-      cmd = "scp -i #{private_key_loc} -o StrictHostkeyChecking=no root@#{target_ip}:#{remote_file_loc} #{local_file_loc}"
+      cmd = "scp -i #{private_key_loc} -o StrictHostkeyChecking=no " \
+            "root@#{target_ip}:#{remote_file_loc} #{local_file_loc}"
     else
-      cmd = "scp -i #{private_key_loc} -o StrictHostkeyChecking=no #{local_file_loc} root@#{target_ip}:#{remote_file_loc}"
+      cmd = "scp -i #{private_key_loc} -o StrictHostkeyChecking=no " \
+            "#{local_file_loc} root@#{target_ip}:#{remote_file_loc}"
     end
 
     RETRIES.downto(0) {
@@ -383,7 +345,7 @@ module HelperFunctions
         # Something very wrong here.
         Djinn.log_warn("Shell cannot execute #{cmd}: retrying in a few.")
       when false
-        Djinn.log_debug("Failed to scp: retrying in a few.")
+        Djinn.log_debug('Failed to scp: retrying in a few.')
       end
       Kernel.sleep(SLEEP_TIME)
     }
@@ -393,26 +355,23 @@ module HelperFunctions
     raise AppScaleSCPException.new("Failed to copy over #{local_file_loc} to #{remote_file_loc} to #{target_ip} with private key #{private_key_loc}")
   end
 
-
   def self.get_remote_appscale_home(ip, key)
-    cat = "cat /etc/appscale/home"
-    remote_cmd = "ssh -i #{key} -o NumberOfPasswordPrompts=0 -o StrictHostkeyChecking=no 2>&1 root@#{ip} '#{cat}'"
-    possible_home = self.shell("#{remote_cmd}").chomp
-    if possible_home.nil? or possible_home.empty?
-      return "/root/appscale/"
-    else
-      return possible_home
-    end
+    cat = 'cat /etc/appscale/home'
+    remote_cmd = "ssh -i #{key} -o NumberOfPasswordPrompts=0 -o " \
+                 "StrictHostkeyChecking=no 2>&1 root@#{ip} '#{cat}'"
+    possible_home = shell(remote_cmd.to_s).chomp
+    return '/root/appscale/' if possible_home.nil? || possible_home.empty?
+    possible_home
   end
 
   def self.get_appscale_id
     # This needs to be ec2 or euca 2ools.
     image_info = `ec2-describe-images`
 
-    self.log_and_crash("ec2 tools can't find appscale image") unless image_info.include?("appscale")
+    log_and_crash("ec2 tools can't find appscale image") unless image_info.include?('appscale')
     image_id = image_info.scan(/([a|e]mi-[0-9a-zA-Z]+)\sappscale/).flatten.to_s
 
-    return image_id
+    image_id
   end
 
   def self.get_cert(filename)
@@ -429,20 +388,20 @@ module HelperFunctions
     })
   end
 
-  def self.get_secret(filename="/etc/appscale/secret.key")
-    return self.read_file(File.expand_path(filename))
+  def self.get_secret(filename = '/etc/appscale/secret.key')
+    read_file(File.expand_path(filename))
   end
 
   # We use a hash of the secret to prevent showing the actual secret as a
   # command line argument.
-  def self.get_taskqueue_secret()
-    return Digest::SHA1.hexdigest(self.get_secret())
+  def self.get_taskqueue_secret
+    Digest::SHA1.hexdigest(get_secret)
   end
 
   # Auxiliary function to test if a tarball is correct.
   #
   # Args:
-  #   tar_gz_location: The location on the local filesystem where the tarball is.
+  #   tar_gz_location: The tarball location on the local filesystem.
   #   md5: The MD5 digest of the tarball.
   # Returns:
   #   true  if the tarball is correct, false otherwise.
@@ -459,7 +418,7 @@ module HelperFunctions
     end
 
     Djinn.log_warn("Tarball #{tar_gz_location} is corrupted.")
-    return false
+    false
   end
 
   # Examines the given tar.gz file to see if it has an App Engine configuration
@@ -475,36 +434,41 @@ module HelperFunctions
     file_listing = HelperFunctions.shell("tar -ztf #{tar_gz_location}")
     app_yaml_regex = /app\.yaml/
     appengine_web_xml_regex = /(.\/)*WEB-INF\/appengine-web\.xml/
-    if file_listing =~ app_yaml_regex or file_listing =~ appengine_web_xml_regex
+    if file_listing =~ app_yaml_regex || file_listing =~ appengine_web_xml_regex
       return true
-    else
-      return false
     end
+    false
   end
-
 
   # Prepare the application code to be run by AppServers.
   #
   # Args:
-  #   app_name: A String containing the application id.
+  #   revision_key: A String containing the revision key.
   # Raise:
   #   AppScaleException: if the setup failed for whatever reason (ie bad
   #     tarball). The exception message would indicate the error.
-  def self.setup_app(app_name)
-    meta_dir = get_app_path(app_name)
-    tar_dir = "#{meta_dir}/app/"
-    begin
-      version_details = ZKInterface.get_version_details(
-        app_name, Djinn::DEFAULT_SERVICE, Djinn::DEFAULT_VERSION)
-    rescue VersionNotFound => error
-      raise AppScaleException.new(error.message)
-    end
-    tar_path = version_details['deployment']['zip']['sourceUrl']
+  def self.setup_revision(revision_key)
+    meta_dir = "#{APPLICATIONS_DIR}/#{revision_key}"
+    tar_dir = "#{meta_dir}/app"
+    return if File.directory?(tar_dir)
 
-    self.shell("mkdir -p #{tar_dir}")
-    self.shell("mkdir -p #{meta_dir}/log")
-    self.shell("cp #{APPSCALE_HOME}/AppDashboard/setup/404.html #{meta_dir}")
-    self.shell("touch #{meta_dir}/log/server.log")
+    # Make sure we have the application source. If not, we have to wait
+    # till the AC populates it.
+    tar_path = "#{Djinn::PERSISTENT_MOUNT_POINT}/apps/#{revision_key}.tar.gz"
+    end_work = Time.now.to_i + SLEEP_TIME * RETRIES
+    while Time.now.to_i < end_work
+      break if File.file?(tar_path)
+      Djinn.log_debug("#{tar_path} is not there yet. Waiting ...")
+      Kernel.sleep(Djinn::SMALL_WAIT)
+    end
+    unless File.file?(tar_path)
+      raise AppScaleException.new("#{tar_path} is not available.")
+    end
+
+    FileUtils.mkdir_p(tar_dir)
+    FileUtils.mkdir_p("#{meta_dir}/log")
+    FileUtils.cp("#{APPSCALE_HOME}/AppDashboard/setup/404.html", meta_dir)
+    FileUtils.touch("#{meta_dir}/log/server.log")
 
     cmd = "tar -xzf #{tar_path} --force-local --no-same-owner -C #{tar_dir}"
     unless system(cmd)
@@ -517,12 +481,11 @@ module HelperFunctions
     begin
       FileUtils.mv("#{tar_dir}/gopath", "#{meta_dir}/gopath")
     rescue Errno::ENOENT
-      Djinn.log_debug("#{app_name} does not have a gopath directory")
+      Djinn.log_debug("#{revision_key} does not have a gopath directory")
     end
 
-    return true
+    true
   end
-
 
   # Queries the operating system to determine which IP addresses are
   # bound to this virtual machine.
@@ -534,8 +497,8 @@ module HelperFunctions
   # Returns:
   #   An Array of Strings, each of which is an IP address bound to
   #     this virtual machine.
-  def self.get_all_local_ips(remove_lo=true)
-    ifconfig = HelperFunctions.shell("ifconfig")
+  def self.get_all_local_ips(remove_lo = true)
+    ifconfig = HelperFunctions.shell('ifconfig')
     Djinn.log_debug("ifconfig returned the following: [#{ifconfig}]")
 
     # Normally we would scan for 'inet addr:', but in non-English locales,
@@ -543,14 +506,11 @@ module HelperFunctions
     # regex.
     bound_addrs = ifconfig.scan(/inet .*?:(\d+.\d+.\d+.\d+) /).flatten
 
-    Djinn.log_debug("ifconfig reports bound IP addresses as " +
+    Djinn.log_debug('ifconfig reports bound IP addresses as ' \
       "[#{bound_addrs.join(', ')}]")
-    if remove_lo
-      bound_addrs.delete(LOCALHOST_IP)
-    end
-    return bound_addrs
+    bound_addrs.delete(LOCALHOST_IP) if remove_lo
+    bound_addrs
   end
-
 
   # Sets the locally cached IP address to the provided value. Callers
   # should use this if they believe the IP address on this machine
@@ -563,7 +523,6 @@ module HelperFunctions
     @@my_local_ip = ip
   end
 
-
   # Returns the IP address associated with this machine. To get around
   # issues where a VM may forget its IP address
   # (https://github.com/AppScale/appscale/issues/84), we locally cache it
@@ -572,21 +531,19 @@ module HelperFunctions
   # VLAN tagging is used, and the IP address may be used.
   # TODO: This doesn't solve the problem if the IP address isn't there
   # the first time around - should we sleep and retry in that case?
-  def self.local_ip()
+  def self.local_ip
     unless @@my_local_ip.nil?
       Djinn.log_debug("Returning cached ip #{@@my_local_ip}")
       return @@my_local_ip
     end
 
-    bound_addrs = self.get_all_local_ips()
-    if bound_addrs.length.zero?
-      raise "Couldn't get our local IP address"
-    end
+    bound_addrs = get_all_local_ips
+    raise 'Couldn\'t get our local IP address' if bound_addrs.length.zero?
 
     addr = bound_addrs[0]
     Djinn.log_debug("Returning #{addr} as our local IP address")
     @@my_local_ip = addr
-    return addr
+    addr
   end
 
   # In cloudy deployments, the recommended way to determine a machine's true
@@ -606,14 +563,15 @@ module HelperFunctions
     ip = `dig #{host} +short`.chomp
     if ip.empty?
       Djinn.log_warn("Couldn't use dig to resolve #{host}.")
-      raise AppScaleException.new("Couldn't convert #{host}: result of dig was \n#{ip}.")
+      raise AppScaleException.new("Couldn't convert #{host}: result of dig" \
+                                  " was \n#{ip}.")
     end
 
-    return ip
+    ip
   end
 
   def self.get_ips(ips)
-    self.log_and_crash("ips not even length array") if ips.length.odd?
+    log_and_crash('ips not even length array') if ips.length.odd?
     reported_public = []
     reported_private = []
     ips.each_index { |index|
@@ -633,7 +591,7 @@ module HelperFunctions
     reported_public.each_index { |index|
       pub = reported_public[index]
       pri = reported_private[index]
-      if pub != "0.0.0.0" and pri != "0.0.0.0"
+      if pub != '0.0.0.0' && pri != '0.0.0.0'
         actual_public << pub
         actual_private << pri
       end
@@ -672,15 +630,13 @@ module HelperFunctions
     average /= prices.length
     plus_twenty = average * 1.20
 
-    Djinn.log_debug("The average spot instance price for a #{instance_type} " +
+    Djinn.log_debug("The average spot instance price for a #{instance_type} " \
       "machine is $#{average}, and 20% more is $#{plus_twenty}")
-    return plus_twenty
+    plus_twenty
   end
 
-
-  def self.spawn_vms(num_of_vms_to_spawn, job, image_id, instance_type, keyname,
-    infrastructure, cloud, group, spot=false)
-
+  def self.spawn_vms(num_of_vms_to_spawn, job, image_id, instance_type,
+                     keyname, infrastructure, cloud, group, spot = false)
     start_time = Time.now
 
     return [] if num_of_vms_to_spawn < 1
@@ -688,13 +644,13 @@ module HelperFunctions
     ssh_key = File.expand_path("#{APPSCALE_CONFIG_DIR}/keys/#{cloud}/#{keyname}.key")
     Djinn.log_debug("About to spawn VMs, expecting to find a key at #{ssh_key}")
 
-    self.log_obscured_env
+    log_obscured_env
 
     new_cloud = !File.exists?(ssh_key)
     if new_cloud # need to create security group and key
       Djinn.log_debug("Creating keys/security group for #{cloud}")
-      self.generate_ssh_key(ssh_key, keyname, infrastructure)
-      self.create_appscale_security_group(infrastructure, group)
+      generate_ssh_key(ssh_key, keyname, infrastructure)
+      create_appscale_security_group(infrastructure, group)
     else
       Djinn.log_debug("Not creating keys/security group for #{cloud}")
     end
@@ -711,7 +667,9 @@ module HelperFunctions
       instance_ids_up = describe_instances.scan(/INSTANCE\s+(i-\w+)/).flatten
       public_up_already, private_up_already = HelperFunctions.get_ips(all_ip_addrs)
       vms_up_already = describe_instances.scan(/(#{IP_OR_FQDN})\s+running\s+#{keyname}\s+/).length
-      break if vms_up_already > 0 or new_cloud # crucial for hybrid cloud, where one box may not be running yet
+
+      # crucial for hybrid cloud, where one box may not be running yet
+      break if vms_up_already > 0 || new_cloud 
     }
 
     args = "-k #{keyname} -n #{num_of_vms_to_spawn} --instance-type #{instance_type} --group #{group} #{image_id}"
@@ -729,16 +687,17 @@ module HelperFunctions
       if run_instances =~ /Please try again later./
         Djinn.log_debug("Error with run_instances: #{run_instances}. Will try again in a moment.")
       elsif run_instances =~ /try --addressing private/
-        Djinn.log_debug("Need to retry with addressing private. Will try again in a moment.")
+        Djinn.log_debug('Need to retry with addressing private. Will try again in a moment.')
         command_to_run << " --addressing private"
       elsif run_instances =~ /PROBLEM/
         Djinn.log_debug("Error: #{run_instances}")
-        self.log_and_crash("Saw the following error message from EC2 tools. Please resolve the issue and try again:\n#{run_instances}")
+        log_and_crash("Saw the following error message from EC2 tools." \
+          "Please resolve the issue and try again:\n#{run_instances}")
       else
-        Djinn.log_debug("Run instances message sent successfully. Waiting for the image to start up.")
+        Djinn.log_debug('Run instances message sent successfully. Waiting for the image to start up.')
         break
       end
-      Djinn.log_debug("sleepy time")
+      Djinn.log_debug('sleepy time')
       sleep(SLEEP_TIME)
     }
 
@@ -758,22 +717,24 @@ module HelperFunctions
       # for appscale only (don't worry about other instances created)
       all_ip_addrs = describe_instances.scan(/\s+(#{IP_OR_FQDN})\s+(#{IP_OR_FQDN})\s+running\s+#{keyname}\s+/).flatten
       public_ips, private_ips = HelperFunctions.get_ips(all_ip_addrs)
-      public_ips = public_ips - public_up_already
-      private_ips = private_ips - private_up_already
+      public_ips -= public_up_already
+      private_ips -= private_up_already
       instance_ids = describe_instances.scan(/INSTANCE\s+(i-\w+)\s+[\w\-\s\.]+#{keyname}/).flatten - instance_ids_up
       break if public_ips.length == num_of_vms_to_spawn
       sleep(SLEEP_TIME)
     end
 
-    self.log_and_crash("No public IPs were able to be procured within the time limit.") if public_ips.length == 0
+    log_and_crash('No public IPs were able to be procured within the time' \
+                  ' limit.') if public_ips.length.zero?
 
     if public_ips.length != num_of_vms_to_spawn
       potential_dead_ips = HelperFunctions.get_ips(all_ip_addrs) - public_up_already
       potential_dead_ips.each_index { |index|
-        if potential_dead_ips[index] == "0.0.0.0"
+        if potential_dead_ips[index] == '0.0.0.0'
           instance_to_term = instance_ids[index]
-          Djinn.log_debug("Instance #{instance_to_term} failed to get a public IP address and is being terminated.")
-          self.shell("#{infrastructure}-terminate-instances #{instance_to_term}")
+          Djinn.log_debug("Instance #{instance_to_term} failed to get a " \
+                          'public IP address and is being terminated.')
+          shell("#{infrastructure}-terminate-instances #{instance_to_term}")
         end
       }
     end
@@ -796,10 +757,10 @@ module HelperFunctions
     total_time = end_time - start_time
 
     if spot
-      Djinn.log_debug("TIMING: It took #{total_time} seconds to spawn " +
+      Djinn.log_debug("TIMING: It took #{total_time} seconds to spawn " \
         "#{num_of_vms_to_spawn} spot instances")
     else
-      Djinn.log_debug("TIMING: It took #{total_time} seconds to spawn " +
+      Djinn.log_debug("TIMING: It took #{total_time} seconds to spawn " \
         "#{num_of_vms_to_spawn} regular instances")
     end
 
@@ -897,25 +858,39 @@ module HelperFunctions
     return result
   end
 
-  def self.get_loaded_apps()
-    apps =[]
-    Dir["#{APPLICATIONS_DIR}/*"].each{ |app|
-      apps << File.basename(app)
+  def self.get_loaded_versions
+    version_keys = []
+    Dir["#{APPLICATIONS_DIR}/*"].each{ |revision_dir|
+      revision_key = File.basename(revision_dir)
+
+      # Ignore project directories.
+      next unless revision_key.include?(Djinn::VERSION_PATH_SEPARATOR)
+      version_keys << revision_key.rpartition(Djinn::VERSION_PATH_SEPARATOR)[0]
     }
-    return apps
+    return version_keys
   end
 
-  def self.get_app_path(app_name)
-    return "#{APPLICATIONS_DIR}/#{app_name}"
-  end
+  # Retrieves the latest revision directory for a project.
+  #
+  # Args:
+  #   project_id: A string specifying a project ID.
+  # Returns:
+  #   A string specifying the location of the source directory.
+  # Raises:
+  #   AppScaleException when unable to find the source directory.
+  def self.get_source_for_project(project_id)
+    begin
+      version_details = ZKInterface.get_version_details(
+        project_id, Djinn::DEFAULT_SERVICE, Djinn::DEFAULT_VERSION)
+    rescue VersionNotFound
+      raise AppScaleException.new('Version not found')
+    end
 
-  def self.get_cache_path(app_name)
-    return File.join(get_app_path(app_name),"cache")
-  end
-
-  # The directory where the applications tarball will be extracted to
-  def self.get_untar_dir(app_name)
-    return File.join(get_app_path(app_name),"app")
+    revision_key = [
+      project_id, Djinn::DEFAULT_SERVICE, Djinn::DEFAULT_VERSION,
+      version_details['revision'].to_s].join(Djinn::VERSION_PATH_SEPARATOR)
+    self.setup_revision(revision_key)
+    return "#{APPLICATIONS_DIR}/#{revision_key}/app"
   end
 
   # Locates WEB-INF folder in an untarred Java app directory.
@@ -926,53 +901,73 @@ module HelperFunctions
   # Returns:
   #  The directory that contains WEB-INF inside a Java app.
   def self.get_web_inf_dir(untar_dir)
-    locations = Array.new()
-    Dir["#{untar_dir}/**/"].each { |path| locations.push(path) if path =~ /^#{untar_dir}\/(.*\/)*WEB-INF\/$/ }
-    if !locations.empty?
-      sorted_locations = locations.sort()
-      location_to_use = sorted_locations[0]
-      sorted_locations.each{ |location|
-        if location.length() < location_to_use.length()
-          location_to_use = location
-        end
-      }
-      return location_to_use
-    else
-      return ""
-    end
+    matches = Array.new
+    Find.find(untar_dir) { |path|
+      next unless File.basename(path) == 'appengine-web.xml'
+      next unless File.file?(path)
+      next unless File.dirname(path).end_with?('/WEB-INF')
+      matches << File.dirname(path)
+    }
+
+    raise InvalidSource.new('WEB-INF directory not found') if matches.empty?
+
+    shortest_match = matches[0]
+    matches.each { |match|
+      if match.split('/').length < shortest_match.split('/').length
+        shortest_match = match
+      end
+    }
+    return shortest_match
   end
 
   # Finds the path to appengine-web.xml configuration file.
   #
   # Args:
-  #  app: The name of the Java app to be deployed.
+  #  source_dir: The location of the revision's source code.
   #
   # Returns:
   #  The absolute path of the appengine-web.xml configuration file.
-  def self.get_appengine_web_xml(app)
-    return File.join(self.get_web_inf_dir("#{get_app_path(app)}/app"), "/appengine-web.xml")
+  def self.get_appengine_web_xml(source_dir)
+    return File.join(self.get_web_inf_dir(source_dir), "/appengine-web.xml")
   end
 
   # We have the files full path (e.g. ./data/myappname/static/file.txt) but we want is
   # the files path relative to the apps directory (e.g. /static/file.txt).
   # This is the hacky way of getting that.
-  def self.get_relative_filename filename, app_name
-    return filename[get_untar_dir(app_name).length..filename.length]
+  def self.get_relative_filename filename, untar_dir
+    return filename[untar_dir.length..filename.length]
   end
 
-  def self.parse_static_data(app_name, copy_files)
-    untar_dir = get_untar_dir(app_name)
+  def self.parse_static_data(version_key, copy_files)
+    # Retrieve latest source archive if not on this machine.
+    project_id, service_id, version_id = version_key.split(
+      Djinn::VERSION_PATH_SEPARATOR)
+    begin
+      version_details = ZKInterface.get_version_details(
+        project_id, service_id, version_id)
+    rescue VersionNotFound
+      return []
+    end
+
+    revision_key = [version_key, version_details['revision'].to_s].join(
+      Djinn::VERSION_PATH_SEPARATOR)
+    begin
+      self.setup_revision(revision_key)
+    rescue AppScaleException
+      return []
+    end
+    untar_dir = "#{APPLICATIONS_DIR}/#{revision_key}/app"
 
     begin
       tree = YAML.load_file(File.join(untar_dir,"app.yaml"))
     rescue Errno::ENOENT
-      return self.parse_java_static_data(app_name)
+      return self.parse_java_static_data(revision_key)
     end
 
     default_expiration = expires_duration(tree["default_expiration"])
 
     # Create the destination cache directory
-    cache_path = get_cache_path(app_name)
+    cache_path = "#{VERSION_ASSETS_DIR}/#{version_key}"
     FileUtils.mkdir_p cache_path
 
     skip_files_regex = DEFAULT_SKIP_FILES_REGEX
@@ -1001,7 +996,7 @@ module HelperFunctions
         # This is for bug https://bugs.launchpad.net/appscale/+bug/800539
         # this is a temp fix
         if handler["url"] == "/"
-          Djinn.log_debug("Remapped path from / to temp_fix for application #{app_name}")
+          Djinn.log_debug("Remapped path from / to temp_fix for application #{version_key}")
           handler["url"] = "/temp_fix"
         end
 
@@ -1022,7 +1017,7 @@ module HelperFunctions
         # This is for bug https://bugs.launchpad.net/appscale/+bug/800539
         # this is a temp fix
         if handler["url"] == "/"
-          Djinn.log_debug("Remapped path from / to temp_fix for application #{app_name}")
+          Djinn.log_debug("Remapped path from / to temp_fix for application #{version_key}")
           handler["url"] = "/temp_fix"
         end
         # Need to convert all \1 into $1 so that nginx understands it
@@ -1037,7 +1032,7 @@ module HelperFunctions
         filenames = Dir.glob(File.join(untar_dir,"**","*"))
 
         filenames.each do |filename|
-          relative_filename = get_relative_filename(filename,app_name)
+          relative_filename = get_relative_filename(filename, untar_dir)
 
           # Only include files that match the provided upload regular expression
           next unless relative_filename.match(upload_regex)
@@ -1057,7 +1052,6 @@ module HelperFunctions
     return handlers.compact
   end
 
-
   # Sets up static files in nginx for this Java App Engine app, by following
   # the default static file rules. Specifically, it states that any file in
   # the app that doesn't end in .jsp that isn't in the WEB-INF directory should
@@ -1068,36 +1062,35 @@ module HelperFunctions
   # assuming they want to use the default scheme mentioned above.
   #
   # Args:
-  #   app_name: A String containing the name of the application whose static
-  #     file info needs to be generated.
+  #   revision_key: A String containing the revision key.
   # Returns:
   #   An Array of Hashes, where each hash names the URL that a static file will
   #   be accessed at, and the location in the static file directory where the
   #   file can be found.
-  def self.parse_java_static_data(app_name)
-    # Verify that app_name is a Java app.
-    begin
-      version_details = ZKInterface.get_version_details(
-        app_name, Djinn::DEFAULT_SERVICE, Djinn::DEFAULT_VERSION)
-    rescue VersionNotFound => error
-      Djinn.log_error(error.message)
-      return []
-    end
+  def self.parse_java_static_data(revision_key)
+    version_key = revision_key.rpartition(Djinn::VERSION_PATH_SEPARATOR)[0]
 
-    tar_gz_location = version_details['deployment']['zip']['sourceUrl']
+    # Verify that revision is a Java app.
+    tar_gz_location = "#{Djinn::PERSISTENT_MOUNT_POINT}/apps/" +
+      "#{revision_key}.tar.gz"
     unless self.app_has_config_file?(tar_gz_location)
-      Djinn.log_warn("#{app_name} does not appear to be a Java app")
+      Djinn.log_warn("#{revision_key} does not appear to be a Java app")
       return []
     end
 
     # Walk through all files in the war directory, and add them if (1) they
     # don't end in .jsp and (2) it isn't the WEB-INF directory.
-    cache_path = self.get_cache_path(app_name)
+    cache_path = "#{VERSION_ASSETS_DIR}/#{version_key}"
     FileUtils.mkdir_p(cache_path)
-    Djinn.log_debug("Made static file dir for app #{app_name} at #{cache_path}")
+    Djinn.log_debug("Made static file dir for #{version_key} at #{cache_path}")
 
-    untar_dir = self.get_untar_dir(app_name)
-    war_dir = self.get_web_inf_dir(untar_dir)
+    untar_dir = "#{APPLICATIONS_DIR}/#{revision_key}/app"
+    begin
+      war_dir = self.get_web_inf_dir(untar_dir)
+    rescue InvalidSource => error
+      Djinn.log_error(error.message)
+      return []
+    end
 
     # Copy static files.
     handlers = []
@@ -1117,49 +1110,60 @@ module HelperFunctions
       }
     }
 
-    return handlers.compact
+    handlers.compact
   end
 
-  # Parses the app.yaml file for the specified application and returns
+  # Parses the app.yaml file for the specified version and returns
   # any URL handlers with a secure tag. The returns secure tags are
   # put into a hash where the hash key is the value of the secure
   # tag (always or never) and value is a list of handlers.
   # Params:
-  #   app_name Name of the application
+  #   version_key: A string specifying the version key.
   # Returns:
   #   A hash containing lists of secure handlers
-  def self.get_secure_handlers(app_name)
-    Djinn.log_debug("Getting secure handlers for app #{app_name}")
-    untar_dir = get_untar_dir(app_name)
+  def self.get_secure_handlers(version_key)
+    Djinn.log_debug("Getting secure handlers for #{version_key}")
+    project_id, service_id, version_id = version_key.split(
+      Djinn::VERSION_PATH_SEPARATOR)
 
     secure_handlers = {
-        :always => [],
-        :never => []
+        always:  [],
+        never:  []
     }
 
     begin
-      tree = YAML.load_file(File.join(untar_dir,"app.yaml"))
+      version_details = ZKInterface.get_version_details(
+        project_id, service_id, version_id)
+    rescue VersionNotFound
+      Djinn.log_warn("Skipping secure handlers for #{version_key} because " \
+                     'version node does not exist')
+      return secure_handlers
+    end
+    revision_key = [version_key, version_details['revision'].to_s].join(
+      Djinn::VERSION_PATH_SEPARATOR)
+    setup_revision(revision_key)
+    untar_dir = "#{APPLICATIONS_DIR}/#{revision_key}/app"
+
+    begin
+      tree = YAML.load_file(File.join(untar_dir, 'app.yaml'))
     rescue Errno::ENOENT
-      Djinn.log_debug("No YAML for static data. Looking for an XML file.")
+      Djinn.log_debug('No YAML for static data. Looking for an XML file.')
       return secure_handlers
     end
 
-    if tree["handlers"]
-      handlers = tree["handlers"]
-    else
-      return secure_handlers
-    end
+    return secure_handlers unless tree['handlers']
+    handlers = tree['handlers']
 
     handlers.map! do |handler|
-      next unless handler.key?("secure")
+      next unless handler.key?('secure')
 
-      if handler["secure"] == "always"
+      if handler['secure'] == 'always'
         secure_handlers[:always] << handler
-      elsif handler["secure"] == "never"
+      elsif handler['secure'] == 'never'
         secure_handlers[:never] << handler
       end
     end
-    return secure_handlers
+    secure_handlers
   end
 
   # Parses the expiration string provided in the app.yaml and returns its duration in seconds
@@ -1174,11 +1178,11 @@ module HelperFunctions
       next if amount.empty? || units.empty?
       duration = (duration || 0) + TIME_IN_SECONDS[units.downcase]*amount.to_i
     end
-    return duration
+    duration
   end
 
   def self.encrypt_password(user, pass)
-    return Digest::SHA1.hexdigest(user + pass)
+    Digest::SHA1.hexdigest(user + pass)
   end
 
   def self.obscure_string(string)
@@ -1198,7 +1202,6 @@ module HelperFunctions
     }
   end
 
-
   # Searches through the key/value pairs given for items that may
   # be too sensitive to log in cleartext. If any of these items are
   # found, a sanitized version of the item is returned in its place.
@@ -1216,28 +1219,24 @@ module HelperFunctions
     obscured = {}
     options.each { |k, v|
       if CLOUDY_CREDS.include?(k)
-        obscured[k] = self.obscure_string(v)
+        obscured[k] = obscure_string(v)
       else
         obscured[k] = v
       end
     }
 
-    return obscured
+    obscured
   end
 
   def self.does_image_have_location?(ip, location, key)
     retries_left = 10
     begin
-      ret_val = self.shell("ssh -i #{key} -o NumberOfPasswordPrompts=0 -o StrictHostkeyChecking=no 2>&1 root@#{ip} 'ls #{location}'; echo $?").chomp[-1]
-      if ret_val.chr == "0"
-        return true
-      end
+      ret_val = shell("ssh -i #{key} -o NumberOfPasswordPrompts=0 -o StrictHostkeyChecking=no 2>&1 root@#{ip} 'ls #{location}'; echo $?").chomp[-1]
+      return true if ret_val.chr == '0'
+
       retries_left -= 1
-      if retries_left > 0
-        raise "Received non-zero exit code while checking for #{location}."
-      else
-        return false
-      end
+      return false if retries_left <= 0
+      raise "Received non-zero exit code while checking for #{location}."
     rescue => error
       Djinn.log_debug("Saw #{error.inspect}. " +
         "Retrying in #{SLEEP_TIME} seconds.")
@@ -1247,16 +1246,15 @@ module HelperFunctions
   end
 
   def self.ensure_image_is_appscale(ip, key)
-    if self.does_image_have_location?(ip, "/etc/appscale", key)
+    if does_image_have_location?(ip, "/etc/appscale", key)
       Djinn.log_debug("Image at #{ip} is an AppScale image.")
     else
-      fail_msg = "The image at #{ip} is not an AppScale image. " +
-                 "Please install AppScale on it and try again."
+      fail_msg = "The image at #{ip} is not an AppScale image. " \
+                 'Please install AppScale on it and try again.'
       Djinn.log_debug(fail_msg)
-      self.log_and_crash(fail_msg)
+      log_and_crash(fail_msg)
     end
   end
-
 
   # Checks to see if the virtual machine at the given IP address has
   # the same version of AppScale installed as these tools.
@@ -1269,108 +1267,57 @@ module HelperFunctions
   #     does not have the same version of AppScale installed as these
   #     tools.
   def self.ensure_version_is_supported(ip, key)
-    version = self.get_appscale_version()
-    return if self.does_image_have_location?(ip, "/etc/appscale/#{version}", key)
-    raise AppScaleException.new("The image at #{ip} does not support " +
-      "this version of AppScale (#{version}). Please install AppScale" +
+    version = get_appscale_version
+    return if does_image_have_location?(ip, "/etc/appscale/#{version}", key)
+    raise AppScaleException.new("The image at #{ip} does not support " \
+      "this version of AppScale (#{version}). Please install AppScale" \
       " #{version} on it and try again.")
   end
 
-
   def self.ensure_db_is_supported(ip, db, key)
-    version = self.get_appscale_version()
-    if self.does_image_have_location?(ip, "/etc/appscale/#{version}/#{db}", key)
+    version = get_appscale_version
+    if does_image_have_location?(ip, "/etc/appscale/#{version}/#{db}", key)
       Djinn.log_debug("Image at #{ip} supports #{db}.")
     else
-      fail_msg = "The image at #{ip} does not have support for #{db}." +
-        " Please install support for this database and try again."
+      fail_msg = "The image at #{ip} does not have support for #{db}." \
+        ' Please install support for this database and try again.'
       Djinn.log_debug(fail_msg)
-      self.log_and_crash(fail_msg)
+      log_and_crash(fail_msg)
     end
   end
 
-  def self.log_obscured_env()
+  def self.log_obscured_env
     env = `env`
 
-    ["EC2_ACCESS_KEY", "EC2_SECRET_KEY"].each { |cred|
+    %w[EC2_ACCESS_KEY EC2_SECRET_KEY].each { |cred|
       if env =~ /#{cred}=(.*)/
-        env.gsub!(/#{cred}=(.*)/, "#{cred}=#{self.obscure_string($1)}")
+        env.gsub!(/#{cred}=(.*)/, "#{cred}=#{obscure_string($1)}")
       end
     }
 
     Djinn.log_debug(env)
   end
 
-  # Finds the configuration file for the given Google App Engine application to
-  # see if any environment variables should be set for it.
+  # Examines the configuration file for the given version to see if it is
+  # thread safe.
   #
   # Args:
-  #   app: A String that represents the application ID of the app whose config
-  #   file we should read.
-  # Returns:
-  #   A Hash whose keys are the environment variables to set, and whose values
-  #   correspond to the values of each environment variable found.
-  # Raises:
-  #   AppScaleException: If the given application doesn't have a configuration
-  #   file.
-  def self.get_app_env_vars(app)
-    app_yaml_file = "#{get_app_path(app)}/app/app.yaml"
-    appengine_web_xml_file = self.get_appengine_web_xml(app)
-    if File.exists?(app_yaml_file)
-      tree = YAML.load_file(app_yaml_file)
-      return tree['env_variables'] || {}
-    elsif File.exists?(appengine_web_xml_file)
-      env_vars = {}
-      xml = HelperFunctions.read_file(appengine_web_xml_file).force_encoding 'utf-8'
-      match_data = xml.scan(/<env-var name="(.*)" value="(.*)" \/>/)
-      match_data.each { |key_and_val|
-        if key_and_val.length == 2
-          env_vars[key_and_val[0]] = key_and_val[1]
-        end
-      }
-      return env_vars
-    else
-      raise AppScaleException.new("Couldn't find an app.yaml or " +
-        "appengine-web.xml file in the #{app} application.")
-    end
-  end
-
-  # Examines the configuration file for the given Google App Engine application
-  # to see if the app is thread safe.
-  #
-  # Args:
-  #   app: A String that represents the application ID of the app whose config
-  #   file we should read. This arg is expected to have the prefix 'gae_'
-  #   so we know it is a gae app and not an appscale app.
+  #   version_key: A String that specifies the version key.
   # Returns:
   #   Boolean true if the app is thread safe. Boolean false if it is not.
-  def self.get_app_thread_safe(app)
-    if app != AppDashboard::APP_NAME and app.start_with?(GAE_PREFIX) == false
+  def self.get_version_thread_safe(version_key)
+    project_id, service_id, version_id = version_key.split(
+      Djinn::VERSION_PATH_SEPARATOR)
+    begin
+      version_details = ZKInterface.get_version_details(
+        project_id, service_id, version_id)
+    rescue VersionNotFound
+      # If the version does not exist, assume it is not thread safe.
       return false
     end
-    app = app.sub(GAE_PREFIX, '')
-    app_yaml_file = "#{get_app_path(app)}/app/app.yaml"
-    appengine_web_xml_file = self.get_appengine_web_xml(app)
-    if File.exists?(app_yaml_file)
-      tree = YAML.load_file(app_yaml_file)
-      return tree['threadsafe'] == true
-    elsif File.exists?(appengine_web_xml_file)
-      return_val = "false"
-      xml = HelperFunctions.read_file(appengine_web_xml_file).force_encoding 'utf-8'
-      match_data = xml.scan(/<threadsafe>(.*)<\/threadsafe>/)
-      match_data.each { |key_and_val|
-        if key_and_val.length == 1
-          return_val = key_and_val[0]
-        end
-      }
-      return return_val == "true"
-    else
-      Djinn.log_warn("Couldn't find an app configuration file for app " +
-        "#{app}, so assuming it is not threadsafe.")
-      return false
-    end
-  end
 
+    version_details.fetch('threadsafe', true)
+  end
 
   # Logs the given message on the filesystem, where the AppScale Tools can
   # report it to the user. This method then crashes the caller, so that the
@@ -1381,8 +1328,8 @@ module HelperFunctions
   #   message: A String that indicates why the AppController is crashing.
   # Raises:
   #   SystemExit: Always occurs, since this method crashes the AppController.
-  def self.log_and_crash(message, sleep=nil)
-    self.write_file(APPCONTROLLER_CRASHLOG_LOCATION, Time.new.to_s + ": " +
+  def self.log_and_crash(message, sleep = nil)
+    write_file(APPCONTROLLER_CRASHLOG_LOCATION, Time.new.to_s + ': ' +
       message)
     # Try to also log to the normal log file.
     Djinn.log_error("FATAL: #{message}")
@@ -1392,7 +1339,6 @@ module HelperFunctions
     Kernel.sleep(sleep) unless sleep.nil?
     abort(message)
   end
-
 
   # Contacts the Metadata Service running in Amazon Web Services, or
   # Google Compute Engine or any other supported public cloud,  to
@@ -1404,7 +1350,7 @@ module HelperFunctions
   # Returns:
   #   A String containing the public IP that traffic can be sent to that
   #   reaches this machine.
-  def self.get_public_ip_from_metadata_service()
+  def self.get_public_ip_from_metadata_service
     url = URI.parse("#{AWS_METADATA}/public-ipv4")
     request = Net::HTTP::Get.new(url.path)
     response = Net::HTTP.start(url.host) { |http| http.request(request) }
@@ -1424,5 +1370,4 @@ module HelperFunctions
       return response.body
     end
   end
-
 end
