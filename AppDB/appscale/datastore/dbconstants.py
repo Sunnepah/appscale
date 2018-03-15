@@ -186,8 +186,19 @@ class AppScaleBadArg(Exception):
   def __str__(self):
     return repr(self.value)
 
+class BadRequest(Exception):
+  """ Indicates that a client provided invalid parameters for a request. """
+
 class ConcurrentModificationException(Exception):
   """ Indicates that an entity fetched during a transaction has changed. """
+  pass
+
+class InternalError(Exception):
+  """ Indicates that the datastore was unable to perform an operation. """
+  pass
+
+class Timeout(Exception):
+  """ Indicates that the datastore timed out while performing an operation. """
   pass
 
 class TooManyGroupsException(Exception):

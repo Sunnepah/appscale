@@ -56,6 +56,11 @@ class InvalidSource(Exception):
   pass
 
 
+class VersionNotChanged(Exception):
+  """ Indicates that the version node was not updated. """
+  pass
+
+
 class ServingStatus(object):
   """ The possible serving states for a project or version. """
   SERVING = 'SERVING'
@@ -96,6 +101,12 @@ IMMUTABLE_PROJECTS = [DASHBOARD_APP_ID]
 
 # The directory where source archives are stored.
 SOURCES_DIRECTORY = os.path.join('/', 'opt', 'appscale', 'apps')
+
+# The inbound services that are supported.
+SUPPORTED_INBOUND_SERVICES = ('INBOUND_SERVICE_WARMUP',
+                              'INBOUND_SERVICE_XMPP_MESSAGE',
+                              'INBOUND_SERVICE_XMPP_SUBSCRIBE',
+                              'INBOUND_SERVICE_XMPP_PRESENCE')
 
 # The ZooKeeper location for storing project details.
 PROJECT_NODE_TEMPLATE = '/appscale/projects/{}'
