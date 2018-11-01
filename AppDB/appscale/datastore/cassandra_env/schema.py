@@ -16,8 +16,9 @@ from cassandra.policies import FallthroughRetryPolicy
 from .cassandra_interface import IndexStates
 from .cassandra_interface import INITIAL_CONNECT_RETRIES
 from .cassandra_interface import KEYSPACE
+from .cassandra_interface import ScatterPropStates
 from .cassandra_interface import ThriftColumn
-from .constants import CURRENT_VERSION
+from .constants import CURRENT_VERSION, LB_POLICY
 from .. import dbconstants
 
 # A policy that does not retry statements.
@@ -222,12 +223,10 @@ def prime_cassandra(replication):
 
   hosts = appscale_info.get_db_ips()
 
-  cluster = None
-  session = None
   remaining_retries = INITIAL_CONNECT_RETRIES
   while True:
     try:
-      cluster = Cluster(hosts)
+      cluster = Cluster(hosts, load_balancing_policy=LB_POLICY)
       session = cluster.connect()
       break
     except cassandra.cluster.NoHostAvailable as connection_error:
@@ -246,6 +245,19 @@ def prime_cassandra(replication):
   session.execute(create_keyspace, {'replication': keyspace_replication},
                   timeout=SCHEMA_CHANGE_TIMEOUT)
   session.set_keyspace(KEYSPACE)
+
+  logging.info('Waiting for all hosts to be connected')
+  deadline = time.time() + SCHEMA_CHANGE_TIMEOUT
+  while True:
+    if time.time() > deadline:
+      logging.warning('Timeout when waiting for hosts to join. Continuing '
+                      'with connected hosts.')
+      break
+
+    if len(session.get_pool_state()) == len(hosts):
+      break
+
+    time.sleep(1)
 
   for table in dbconstants.INITIAL_TABLES:
     create_table = """
@@ -318,6 +330,12 @@ def prime_cassandra(replication):
                   'value': bytearray(str(IndexStates.CLEAN))}
     session.execute(metadata_insert, parameters)
 
+    # Indicate that scatter property values do not need to be populated.
+    parameters = {'key': bytearray(cassandra_interface.SCATTER_PROP_KEY),
+                  'column': cassandra_interface.SCATTER_PROP_KEY,
+                  'value': bytearray(ScatterPropStates.POPULATED)}
+    session.execute(metadata_insert, parameters)
+
   # Indicate that the database has been successfully primed.
   parameters = {'key': bytearray(cassandra_interface.PRIMED_KEY),
                 'column': cassandra_interface.PRIMED_KEY,
@@ -338,7 +356,7 @@ def primed():
     return False
 
   try:
-    primed_version = db_access.get_metadata(cassandra_interface.PRIMED_KEY)
+    primed_version = db_access.get_metadata_sync(cassandra_interface.PRIMED_KEY)
     return primed_version == str(CURRENT_VERSION)
   finally:
     db_access.close()
